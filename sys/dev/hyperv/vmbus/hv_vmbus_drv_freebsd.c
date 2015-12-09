@@ -312,7 +312,7 @@ hv_vmbus_child_device_register(struct hv_device *child_dev)
 	ret = device_probe_and_attach(child);
 	mtx_unlock(&Giant);
 
-	return (0);
+	return (ret);
 }
 
 int
