@@ -531,13 +531,13 @@ vmbus_bus_init(void)
 			goto cleanup1;
 		}
 		ret = intr_event_bind(hv_vmbus_g_context.hv_event_intr_event[j],
-                    j);
-                if (ret) {
-                        if(bootverbose)
-                                printf("VMBUS: failed to bind event swi thread "
-                                    "to cpu %d\n", j);
-                        goto cleanup1;
-                }
+		    j);
+		if (ret) {
+		        if(bootverbose)
+				printf("VMBUS: failed to bind event swi thread "
+				    "to cpu %d\n", j);
+			goto cleanup1;
+		}
 		/*
 		 * Prepare the per cpu msg and event pages to be called on each cpu.
 		 */
