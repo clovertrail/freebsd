@@ -496,7 +496,7 @@ vmbus_bus_init(void)
 		 * Setup software interrupt thread and handler for msg handling.
 		 */
 		ret = swi_add(&hv_vmbus_g_context.hv_msg_intr_event[j],
-		    "hv_msg", vmbus_msg_swintr, (void *)(long)j, SWI_CLOCK, 0,
+		    "hv_msg", vmbus_msg_swintr, (void *)(long)j, SWI_NET, INTR_MPSAFE,
 		    &hv_vmbus_g_context.msg_swintr[j]);
 		if (ret) {
 			if(bootverbose)
@@ -523,14 +523,21 @@ vmbus_bus_init(void)
 		 */
 		ret = swi_add(&hv_vmbus_g_context.hv_event_intr_event[j],
 		    "hv_event", hv_vmbus_on_events, (void *)(long)j,
-		    SWI_CLOCK, 0, &hv_vmbus_g_context.event_swintr[j]);
+		    SWI_NET, INTR_MPSAFE, &hv_vmbus_g_context.event_swintr[j]);
 		if (ret) {
 			if(bootverbose)
 				printf("VMBUS: failed to setup event swi for "
 				    "cpu %d\n", j);
 			goto cleanup1;
 		}
-
+		ret = intr_event_bind(hv_vmbus_g_context.hv_event_intr_event[j],
+                    j);
+                if (ret) {
+                        if(bootverbose)
+                                printf("VMBUS: failed to bind event swi thread "
+                                    "to cpu %d\n", j);
+                        goto cleanup1;
+                }
 		/*
 		 * Prepare the per cpu msg and event pages to be called on each cpu.
 		 */
