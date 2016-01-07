@@ -834,6 +834,18 @@ hv_set_channel_read_state(hv_vmbus_channel* channel, boolean_t state)
 	channel->batched_reading = state;
 }
 
+static inline void
+hv_set_per_channel_state(hv_vmbus_channel* channel, void *state)
+{
+	channel->per_channel_state = state;
+}
+
+static inline void *
+hv_get_per_channel_state(hv_vmbus_channel* channel)
+{
+	return channel->per_channel_state;
+}
+
 typedef struct hv_device {
 	hv_guid		    class_id;
 	hv_guid		    device_id;

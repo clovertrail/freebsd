@@ -917,7 +917,8 @@ typedef struct netvsc_dev_ {
 	/* Negotiated NVSP version */
 	uint32_t				nvsp_version;
 	
-	uint8_t					callback_buf[NETVSC_PACKET_SIZE]; 
+	/* The callback buffer for primary channel */
+        uint8_t                                 callback_buf[NETVSC_PACKET_SIZE];
 } netvsc_dev;
 
 
@@ -1023,7 +1024,9 @@ extern int hv_promisc_mode;
 void netvsc_linkstatus_callback(struct hv_device *device_obj, uint32_t status);
 void netvsc_xmit_completion(void *context);
 void hv_nv_on_receive_completion(struct hv_device *device,
-    uint64_t tid, uint32_t status);
+	hv_vmbus_channel *channel,
+	uint64_t tid,
+	uint32_t status);
 netvsc_dev *hv_nv_on_device_add(struct hv_device *device,
     void *additional_info);
 int hv_nv_on_device_remove(struct hv_device *device,

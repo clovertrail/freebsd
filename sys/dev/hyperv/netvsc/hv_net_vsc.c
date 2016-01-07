@@ -61,9 +61,12 @@ static int  hv_nv_destroy_send_buffer(netvsc_dev *net_dev);
 static int  hv_nv_destroy_rx_buffer(netvsc_dev *net_dev);
 static int  hv_nv_connect_to_vsp(struct hv_device *device);
 static void hv_nv_on_send_completion(netvsc_dev *net_dev,
-    struct hv_device *device, hv_vm_packet_descriptor *pkt);
+	struct hv_device *device,
+	hv_vm_packet_descriptor *pkt);
 static void hv_nv_on_receive(netvsc_dev *net_dev,
-    struct hv_device *device, hv_vm_packet_descriptor *pkt);
+	struct hv_device *device,
+	hv_vmbus_channel *channel,
+	hv_vm_packet_descriptor *pkt);
 
 /*
  *
@@ -685,12 +688,13 @@ hv_nv_on_device_add(struct hv_device *device, void *additional_info)
 
 	sema_init(&net_dev->channel_init_sema, 0, "netdev_sema");
 
+	hv_set_per_channel_state(device->channel, net_dev->callback_buf);
 	/*
 	 * Open the channel
 	 */
 	ret = hv_vmbus_channel_open(device->channel,
 	    NETVSC_DEVICE_RING_BUFFER_SIZE, NETVSC_DEVICE_RING_BUFFER_SIZE,
-	    NULL, 0, hv_nv_on_channel_callback, device);
+	    NULL, 0, hv_nv_on_channel_callback, device->channel);
 	if (ret != 0)
 		goto cleanup;
 
@@ -764,7 +768,8 @@ hv_nv_on_device_remove(struct hv_device *device, boolean_t destroy_channel)
  */
 static void
 hv_nv_on_send_completion(netvsc_dev *net_dev,
-    struct hv_device *device, hv_vm_packet_descriptor *pkt)
+	struct hv_device *device,
+	hv_vm_packet_descriptor *pkt)
 {
 	nvsp_msg *nvsp_msg_pkt;
 	netvsc_packet *net_vsc_pkt;
@@ -858,8 +863,10 @@ hv_nv_on_send(struct hv_device *device, netvsc_packet *pkt)
  * with virtual addresses.
  */
 static void
-hv_nv_on_receive(netvsc_dev *net_dev, struct hv_device *device,
-    hv_vm_packet_descriptor *pkt)
+hv_nv_on_receive(netvsc_dev *net_dev,
+	struct hv_device *device,
+	hv_vmbus_channel *channel,
+	hv_vm_packet_descriptor *pkt)
 {
 	hv_vm_transfer_page_packet_header *vm_xfer_page_pkt;
 	nvsp_msg *nvsp_msg_pkt;
@@ -920,7 +927,7 @@ hv_nv_on_receive(netvsc_dev *net_dev, struct hv_device *device,
 	 * messages (not just data messages) will trigger a response
 	 * message back to the host.
 	 */
-	hv_nv_on_receive_completion(device, vm_xfer_page_pkt->d.transaction_id,
+	hv_nv_on_receive_completion(device, channel, vm_xfer_page_pkt->d.transaction_id,
 	    status);
 	hv_rf_receive_rollup(net_dev);
 }
@@ -931,8 +938,10 @@ hv_nv_on_receive(netvsc_dev *net_dev, struct hv_device *device,
  * Send a receive completion packet to RNDIS device (ie NetVsp)
  */
 void
-hv_nv_on_receive_completion(struct hv_device *device, uint64_t tid,
-    uint32_t status)
+hv_nv_on_receive_completion(struct hv_device *device,
+	hv_vmbus_channel *channel,
+	uint64_t tid,
+	uint32_t status)
 {
 	nvsp_msg rx_comp_msg;
 	int retries = 0;
@@ -946,7 +955,7 @@ hv_nv_on_receive_completion(struct hv_device *device, uint64_t tid,
 
 retry_send_cmplt:
 	/* Send the completion */
-	ret = hv_vmbus_channel_send_packet(device->channel, &rx_comp_msg,
+	ret = hv_vmbus_channel_send_packet(channel, &rx_comp_msg,
 	    sizeof(nvsp_msg), tid, HV_VMBUS_PACKET_TYPE_COMPLETION, 0);
 	if (ret == 0) {
 		/* success */
@@ -968,9 +977,10 @@ retry_send_cmplt:
 static void
 hv_nv_on_channel_callback(void *context)
 {
-	struct hv_device *device = (struct hv_device *)context;
+	hv_vmbus_channel *channel = (hv_vmbus_channel *)context;
+	struct hv_device *device;
 	netvsc_dev *net_dev;
-	device_t dev = device->device;
+	device_t dev;
 	uint32_t bytes_rxed;
 	uint64_t request_id;
  	hv_vm_packet_descriptor *desc;
@@ -978,14 +988,22 @@ hv_nv_on_channel_callback(void *context)
 	int bufferlen = NETVSC_PACKET_SIZE;
 	int ret = 0;
 
+	if (channel->primary_channel != NULL)
+		device = channel->primary_channel->device;
+	else
+        	device = channel->device;
+	dev = device->device;
+
 	net_dev = hv_nv_get_inbound_net_device(device);
 	if (net_dev == NULL)
 		return;
 
-	buffer = net_dev->callback_buf;
+	buffer = hv_get_per_channel_state(channel);
+	if (buffer == NULL)
+		return;
 
 	do {
-		ret = hv_vmbus_channel_recv_packet_raw(device->channel,
+		ret = hv_vmbus_channel_recv_packet_raw(channel,
 		    buffer, bufferlen, &bytes_rxed, &request_id);
 		if (ret == 0) {
 			if (bytes_rxed > 0) {
@@ -995,7 +1013,7 @@ hv_nv_on_channel_callback(void *context)
 					hv_nv_on_send_completion(net_dev, device, desc);
 					break;
 				case HV_VMBUS_PACKET_TYPE_DATA_USING_TRANSFER_PAGES:
-					hv_nv_on_receive(net_dev, device, desc);
+					hv_nv_on_receive(net_dev, device, channel, desc);
 					break;
 				default:
 					device_printf(dev,
