@@ -45,6 +45,7 @@
 #include <machine/atomic.h>
 
 #include <dev/hyperv/include/hyperv.h>
+#include <dev/hyperv/vmbus/hv_vmbus_priv.h>
 #include "hv_net_vsc.h"
 #include "hv_rndis.h"
 #include "hv_rndis_filter.h"
@@ -54,7 +55,6 @@ MALLOC_DEFINE(M_NETVSC, "netvsc", "Hyper-V netvsc driver");
 /*
  * Forward declarations
  */
-static void hv_nv_on_channel_callback(void *context);
 static int  hv_nv_init_send_buffer_with_net_vsp(struct hv_device *device);
 static int  hv_nv_init_rx_buffer_with_net_vsp(struct hv_device *device);
 static int  hv_nv_destroy_send_buffer(netvsc_dev *net_dev);
@@ -177,7 +177,10 @@ hv_nv_init_rx_buffer_with_net_vsp(struct hv_device *device)
 
 	net_dev->rx_buf = contigmalloc(net_dev->rx_buf_size, M_NETVSC,
 	    M_ZERO, 0UL, BUS_SPACE_MAXADDR, PAGE_SIZE, 0);
-
+	if (net_dev->rx_buf == NULL) {
+		ret = ENOMEM;
+		goto cleanup;
+	}
 	/*
 	 * Establish the GPADL handle for this buffer on this channel.
 	 * Note:  This call uses the vmbus connection rather than the
@@ -663,6 +666,8 @@ hv_nv_disconnect_from_vsp(netvsc_dev *net_dev)
 	hv_nv_destroy_send_buffer(net_dev);
 }
 
+#define HV_BR_SIZE      8192
+
 /*
  * Net VSC on device add
  * 
@@ -672,12 +677,37 @@ netvsc_dev *
 hv_nv_on_device_add(struct hv_device *device, void *additional_info)
 {
 	netvsc_dev *net_dev;
-	int ret = 0;
+	hn_softc_t *sc = device_get_softc(device->device);
+	tx_chn *txq;
+	int i, ret = 0;
 
 	net_dev = hv_nv_alloc_net_device(device);
 	if (!net_dev)
 		goto cleanup;
 
+	/*
+	 * Initialize structures for tx channels.
+	 */
+	for (i = 0; i < mp_ncpus; i ++) {
+        	txq = &net_dev->txq[i];
+	        txq->ifp = sc->hn_ifp;
+        	mtx_init(&txq->txq_mtx, "Netvsc-tx", NULL, MTX_DEF);
+
+	        TASK_INIT(&txq->txq_task, 0, hv_nv_deferred_mq_start, txq);
+        	txq->txq_tq = taskqueue_create("netvsc_que",
+	            M_NOWAIT, taskqueue_thread_enqueue,
+        	    &txq->txq_tq);
+	        taskqueue_start_threads(&txq->txq_tq, 1,
+        	    PI_NET,
+	            "%s que %d",
+        	    device_get_nameunit(net_dev->dev->device),
+	            i);
+
+        	txq->txq_br = buf_ring_alloc(HV_BR_SIZE, M_NETVSC,
+	            M_WAITOK, &txq->txq_mtx);
+        	if (txq->txq_br == NULL)
+                	goto cleanup;
+	}
 	/* Initialize the NetVSC channel extension */
 	net_dev->rx_buf_size = NETVSC_RECEIVE_BUFFER_SIZE;
 
@@ -686,6 +716,15 @@ hv_nv_on_device_add(struct hv_device *device, void *additional_info)
 	sema_init(&net_dev->channel_init_sema, 0, "netdev_sema");
 
 	hv_set_per_channel_state(device->channel, net_dev->callback_buf);
+
+	/*
+	 * For primary channel, always bind it to cpu 0.
+	 */
+	device->channel->target_cpu = 0;
+	device->channel->target_vcpu =
+	    hv_vmbus_g_context.hv_vcpu_index[device->channel->target_cpu];
+	net_dev->txq[0].cpu_to_chn = device->channel;
+
 	/*
 	 * Open the channel
 	 */
@@ -695,6 +734,7 @@ hv_nv_on_device_add(struct hv_device *device, void *additional_info)
 	if (ret != 0)
 		goto cleanup;
 
+	net_dev->channel_table[0] = device->channel;
 	/*
 	 * Connect with the NetVsp
 	 */
@@ -716,6 +756,13 @@ cleanup:
 	 */
 	if (net_dev) {
 		sema_destroy(&net_dev->channel_init_sema);
+		
+		for (i = 0; i < mp_ncpus; i ++) {
+			mtx_destroy(&net_dev->txq[i].txq_mtx);
+			if (txq->txq_br != NULL)
+				buf_ring_free(txq->txq_br, M_NETVSC);
+		}
+
 		free(net_dev, M_NETVSC);
 	}
 
@@ -778,7 +825,9 @@ hv_nv_on_send_completion(netvsc_dev *net_dev,
 		|| nvsp_msg_pkt->hdr.msg_type
 			== nvsp_msg_1_type_send_rx_buf_complete
 		|| nvsp_msg_pkt->hdr.msg_type
-			== nvsp_msg_1_type_send_send_buf_complete) {
+			== nvsp_msg_1_type_send_send_buf_complete
+		|| nvsp_msg_pkt->hdr.msg_type
+			== nvsp_msg5_type_subchannel) {
 		/* Copy the response back */
 		memcpy(&net_dev->channel_init_packet, nvsp_msg_pkt,
 		    sizeof(nvsp_msg));
@@ -816,6 +865,12 @@ hv_nv_on_send(struct hv_device *device, netvsc_packet *pkt)
 	netvsc_dev *net_dev;
 	nvsp_msg send_msg;
 	int ret;
+	hv_vmbus_channel *channel;
+
+	if (pkt->channel)
+		channel = pkt->channel;
+	else
+		channel = device->channel;
 
 	net_dev = hv_nv_get_outbound_net_device(device);
 	if (!net_dev)
@@ -836,11 +891,11 @@ hv_nv_on_send(struct hv_device *device, netvsc_packet *pkt)
 	    pkt->send_buf_section_size;
 
 	if (pkt->page_buf_count) {
-		ret = hv_vmbus_channel_send_packet_pagebuffer(device->channel,
+		ret = hv_vmbus_channel_send_packet_pagebuffer(channel,
 		    pkt->page_buffers, pkt->page_buf_count,
 		    &send_msg, sizeof(nvsp_msg), (uint64_t)(uintptr_t)pkt);
 	} else {
-		ret = hv_vmbus_channel_send_packet(device->channel,
+		ret = hv_vmbus_channel_send_packet(channel,
 		    &send_msg, sizeof(nvsp_msg), (uint64_t)(uintptr_t)pkt,
 		    HV_VMBUS_PACKET_TYPE_DATA_IN_BAND,
 		    HV_VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
@@ -904,6 +959,8 @@ hv_nv_on_receive(netvsc_dev *net_dev,
 
 	count = vm_xfer_page_pkt->range_count;
 	net_vsc_pkt->device = device;
+	net_vsc_pkt->channel = channel;
+	net_vsc_pkt->q_idx = channel->target_cpu;
 
 	/* Each range represents 1 RNDIS pkt that contains 1 Ethernet frame */
 	for (i = 0; i < count; i++) {
@@ -968,9 +1025,49 @@ retry_send_cmplt:
 }
 
 /*
- * Net VSC on channel callback
+ * Net VSC receiving vRSS send table from VSP
  */
 static void
+hv_nv_send_table(struct hv_device *device, hv_vm_packet_descriptor *pkt)
+{
+	netvsc_dev *net_dev;
+	nvsp_msg *nvsp_msg_pkt;
+	int i;
+	uint32_t count, *table;
+
+	net_dev = hv_nv_get_inbound_net_device(device);
+	if (!net_dev)
+        	return;
+
+	nvsp_msg_pkt =
+	    (nvsp_msg *)((unsigned long)pkt + (pkt->data_offset8 << 3));
+
+	if (nvsp_msg_pkt->hdr.msg_type !=
+	    nvsp_msg5_type_send_indirection_table) {
+		printf("Netvsc: !Warning! receive msg type not "
+			"send_indirection_table. type = %d\n",
+			nvsp_msg_pkt->hdr.msg_type);
+		return;
+	}
+
+	count = nvsp_msg_pkt->msgs.vers_5_msgs.send_table.count;
+	if (count != VRSS_SEND_TABLE_SIZE) {
+        	printf("Netvsc: Received wrong send table size: %u\n", count);
+	        return;
+	}
+
+	table = (uint32_t *)
+	    ((unsigned long)&nvsp_msg_pkt->msgs.vers_5_msgs.send_table +
+	     nvsp_msg_pkt->msgs.vers_5_msgs.send_table.offset);
+
+	for (i = 0; i < count; i++)
+        	net_dev->vrss_send_table[i] = table[i];
+}
+
+/*
+ * Net VSC on channel callback
+ */
+void
 hv_nv_on_channel_callback(void *context)
 {
 	hv_vmbus_channel *channel = (hv_vmbus_channel *)context;
@@ -1010,6 +1107,9 @@ hv_nv_on_channel_callback(void *context)
 					break;
 				case HV_VMBUS_PACKET_TYPE_DATA_USING_TRANSFER_PAGES:
 					hv_nv_on_receive(net_dev, device, channel, desc);
+					break;
+				case HV_VMBUS_PACKET_TYPE_DATA_IN_BAND:
+					hv_nv_send_table(device, desc);
 					break;
 				default:
 					device_printf(dev,

@@ -179,9 +179,10 @@ static void hn_stop(hn_softc_t *sc);
 static void hn_ifinit_locked(hn_softc_t *sc);
 static void hn_ifinit(void *xsc);
 static int  hn_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data);
-static int  hn_start_locked(struct ifnet *ifp);
-static void hn_start(struct ifnet *ifp);
-
+static int  hn_mq_start(struct ifnet *ifp, struct mbuf *m);
+static int  hn_mq_start_locked(struct ifnet *ifp, tx_chn *txq);
+static void hn_qflush(struct ifnet *ifp);
+static int  hn_xmit(struct ifnet *ifp, struct mbuf *m_head, tx_chn *txq);
 /*
  * NetVsc get message transport protocol type 
  */
@@ -336,8 +337,9 @@ netvsc_attach(device_t dev)
 
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_ioctl = hn_ioctl;
-	ifp->if_start = hn_start;
 	ifp->if_init = hn_ifinit;
+	ifp->if_transmit = hn_mq_start;
+	ifp->if_qflush = hn_qflush;
 	/* needed by hv_rf_on_device_add() code */
 	ifp->if_mtu = ETHERMTU;
 	IFQ_SET_MAXLEN(&ifp->if_snd, 512);
@@ -438,18 +440,40 @@ netvsc_xmit_completion(void *context)
 }
 
 /*
- * Start a transmit of one or more packets
+ * Flush all queues
  */
+static void
+hn_qflush(struct ifnet *ifp)
+{
+	if_qflush(ifp);
+}
+
+/*
+ * Called from a taskqueue to tx packets.
+ */
+void
+hv_nv_deferred_mq_start(void *arg, int pending)
+{
+	tx_chn *txq = arg;
+	struct ifnet *ifp = txq->ifp;
+
+	mtx_lock(&txq->txq_mtx);
+	if (!drbr_empty(ifp, txq->txq_br)) {
+        	hn_mq_start_locked(ifp, txq);
+	}
+	mtx_unlock(&txq->txq_mtx);
+}
+
+
 static int
-hn_start_locked(struct ifnet *ifp)
+hn_xmit(struct ifnet *ifp, struct mbuf *m_head, tx_chn *txq)
 {
 	hn_softc_t *sc = ifp->if_softc;
 	struct hv_device *device_ctx = vmbus_get_devctx(sc->hn_dev);
-	netvsc_dev *net_dev = sc->net_dev;
 	device_t dev = device_ctx->device;
 	uint8_t *buf;
 	netvsc_packet *packet;
-	struct mbuf *m_head, *m;
+	struct mbuf *m;
 	struct mbuf *mc_head = NULL;
 	struct ether_vlan_header *eh;
 	rndis_msg *rndis_mesg;
@@ -468,334 +492,368 @@ hn_start_locked(struct ifnet *ifp)
 	uint32_t trans_proto_type;
 	uint32_t send_buf_section_idx =
 	    NVSP_1_CHIMNEY_SEND_INVALID_SECTION_INDEX;
+	netvsc_dev *net_dev = sc->net_dev;
 
-	while (!IFQ_DRV_IS_EMPTY(&sc->hn_ifp->if_snd)) {
-		IFQ_DRV_DEQUEUE(&sc->hn_ifp->if_snd, m_head);
-		if (m_head == NULL) {
-			break;
+	if (m_head == NULL) {
+		return (ret);
+	}
+
+	len = 0;
+	num_frags = 0;
+
+	/* Walk the mbuf list computing total length and num frags */
+	for (m = m_head; m != NULL; m = m->m_next) {
+		if (m->m_len != 0) {
+			num_frags++;
+			len += m->m_len;
 		}
+	}
 
-		len = 0;
-		num_frags = 0;
+	/*
+	 * Reserve the number of pages requested.  Currently,
+	 * one page is reserved for the message in the RNDIS
+	 * filter packet
+	 */
+	num_frags += HV_RF_NUM_TX_RESERVED_PAGE_BUFS;
 
-		/* Walk the mbuf list computing total length and num frags */
-		for (m = m_head; m != NULL; m = m->m_next) {
-			if (m->m_len != 0) {
-				num_frags++;
-				len += m->m_len;
-			}
-		}
+	/* If exceeds # page_buffers in netvsc_packet */
+	if (num_frags > NETVSC_PACKET_MAXPAGE) {
+		device_printf(dev, "exceed max page buffers,%d,%d\n",
+		    num_frags, NETVSC_PACKET_MAXPAGE);
+		m_freem(m_head);
+		if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
+		return (EINVAL);
+	}
 
+	/*
+	 * Allocate a buffer with space for a netvsc packet plus a
+	 * number of reserved areas.  First comes a (currently 16
+	 * bytes, currently unused) reserved data area.  Second is
+	 * the netvsc_packet, which includes (currently 4) page
+	 * buffers.  Third (optional) is a rndis_per_packet_info
+	 * struct, but only if a VLAN tag should be inserted into the
+	 * Ethernet frame by the Hyper-V infrastructure.  Fourth is
+	 * an area reserved for an rndis_filter_packet struct.
+	 * Changed malloc to M_NOWAIT to avoid sleep under spin lock.
+	 * No longer reserving extra space for page buffers, as they
+	 * are already part of the netvsc_packet.
+	 */
+	buf = malloc(HV_NV_PACKET_OFFSET_IN_BUF +
+		sizeof(netvsc_packet) + 
+		sizeof(rndis_msg) +
+		RNDIS_VLAN_PPI_SIZE +
+		RNDIS_TSO_PPI_SIZE +
+		RNDIS_CSUM_PPI_SIZE +
+		RNDIS_HASH_PPI_SIZE,
+		M_NETVSC, M_ZERO | M_NOWAIT);
+	if (buf == NULL) {
+		device_printf(dev, "hn:malloc packet failed\n");
+		m_freem(m_head);
+		if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
+		return (ENOMEM);
+	}
+
+	packet = (netvsc_packet *)(buf + HV_NV_PACKET_OFFSET_IN_BUF);
+	*(vm_offset_t *)buf = HV_NV_SC_PTR_OFFSET_IN_BUF;
+
+	packet->is_data_pkt = TRUE;
+	
+	/* Set up the rndis header */
+	packet->page_buf_count = num_frags;
+	
+	/* Initialize it from the mbuf */
+	packet->tot_data_buf_len = len;
+
+	packet->channel = txq->cpu_to_chn;
+	
+	/*
+	 * extension points to the area reserved for the
+	 * rndis_filter_packet, which is placed just after
+	 * the netvsc_packet (and rppi struct, if present;
+	 * length is updated later).
+	 */
+	packet->rndis_mesg = packet + 1;
+	
+	rndis_mesg = (rndis_msg *)packet->rndis_mesg;
+	rndis_mesg->ndis_msg_type = REMOTE_NDIS_PACKET_MSG;
+	
+	rndis_pkt = &rndis_mesg->msg.packet;
+	rndis_pkt->data_offset = sizeof(rndis_packet);
+	rndis_pkt->data_length = packet->tot_data_buf_len;		
+	rndis_pkt->per_pkt_info_offset = sizeof(rndis_packet);
+	
+	rndis_msg_size = RNDIS_MESSAGE_SIZE(rndis_packet);
+
+
+	/*
+	 * If the Hyper-V infrastructure needs to embed a VLAN tag,
+	 * initialize netvsc_packet and rppi struct values as needed.
+	 */
+	if (m_head->m_flags & M_VLANTAG) {
 		/*
-		 * Reserve the number of pages requested.  Currently,
-		 * one page is reserved for the message in the RNDIS
-		 * filter packet
+		 * set up some additional fields so the Hyper-V infrastructure will stuff the VLAN tag
+		 * into the frame.
 		 */
-		num_frags += HV_RF_NUM_TX_RESERVED_PAGE_BUFS;
-
-		/* If exceeds # page_buffers in netvsc_packet */
-		if (num_frags > NETVSC_PACKET_MAXPAGE) {
-			device_printf(dev, "exceed max page buffers,%d,%d\n",
-			    num_frags, NETVSC_PACKET_MAXPAGE);
-			m_freem(m_head);
-			if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
-			return (EINVAL);
-		}
-
-		/*
-		 * Allocate a buffer with space for a netvsc packet plus a
-		 * number of reserved areas.  First comes a (currently 16
-		 * bytes, currently unused) reserved data area.  Second is
-		 * the netvsc_packet. Third is an area reserved for an 
-		 * rndis_filter_packet struct. Fourth (optional) is a 
-		 * rndis_per_packet_info struct.
-		 * Changed malloc to M_NOWAIT to avoid sleep under spin lock.
-		 * No longer reserving extra space for page buffers, as they
-		 * are already part of the netvsc_packet.
-		 */
-		buf = malloc(HV_NV_PACKET_OFFSET_IN_BUF +
-			sizeof(netvsc_packet) + 
-			sizeof(rndis_msg) +
-			RNDIS_VLAN_PPI_SIZE +
-			RNDIS_TSO_PPI_SIZE +
-			RNDIS_CSUM_PPI_SIZE,
-			M_NETVSC, M_ZERO | M_NOWAIT);
-		if (buf == NULL) {
-			device_printf(dev, "hn:malloc packet failed\n");
-			m_freem(m_head);
-			if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
-			return (ENOMEM);
-		}
-
-		packet = (netvsc_packet *)(buf + HV_NV_PACKET_OFFSET_IN_BUF);
-		*(vm_offset_t *)buf = HV_NV_SC_PTR_OFFSET_IN_BUF;
-
-		packet->is_data_pkt = TRUE;
-
-		/* Set up the rndis header */
-		packet->page_buf_count = num_frags;
-
-		/* Initialize it from the mbuf */
-		packet->tot_data_buf_len = len;
-
-		/*
-		 * extension points to the area reserved for the
-		 * rndis_filter_packet, which is placed just after
-		 * the netvsc_packet (and rppi struct, if present;
-		 * length is updated later).
-		 */
-		packet->rndis_mesg = packet + 1;
-		rndis_mesg = (rndis_msg *)packet->rndis_mesg;
-		rndis_mesg->ndis_msg_type = REMOTE_NDIS_PACKET_MSG;
-
-		rndis_pkt = &rndis_mesg->msg.packet;
-		rndis_pkt->data_offset = sizeof(rndis_packet);
-		rndis_pkt->data_length = packet->tot_data_buf_len;
-		rndis_pkt->per_pkt_info_offset = sizeof(rndis_packet);
-
-		rndis_msg_size = RNDIS_MESSAGE_SIZE(rndis_packet);
-
-		/*
-		 * If the Hyper-V infrastructure needs to embed a VLAN tag,
-		 * initialize netvsc_packet and rppi struct values as needed.
-		 */
-		if (m_head->m_flags & M_VLANTAG) {
-			/*
-			 * set up some additional fields so the Hyper-V infrastructure will stuff the VLAN tag
-			 * into the frame.
-			 */
-			packet->vlan_tci = m_head->m_pkthdr.ether_vtag;
-
-			rndis_msg_size += RNDIS_VLAN_PPI_SIZE;
-
-			rppi = hv_set_rppi_data(rndis_mesg, RNDIS_VLAN_PPI_SIZE,
-			    ieee_8021q_info);
+		packet->vlan_tci = m_head->m_pkthdr.ether_vtag;
 		
-			/* VLAN info immediately follows rppi struct */
-			rppi_vlan_info = (ndis_8021q_info *)((char*)rppi + 
-			    rppi->per_packet_info_offset);
-			/* FreeBSD does not support CFI or priority */
-			rppi_vlan_info->u1.s1.vlan_id =
-			    packet->vlan_tci & 0xfff;
-		}
+		rndis_msg_size += RNDIS_VLAN_PPI_SIZE;
+		
+		rppi = hv_set_rppi_data(rndis_mesg, RNDIS_VLAN_PPI_SIZE,
+					ieee_8021q_info);
+		
+		/* VLAN info immediately follows rppi struct */
+		rppi_vlan_info = (ndis_8021q_info *)((char*)rppi + 
+							rppi->per_packet_info_offset);
+		/* FreeBSD does not support CFI or priority */
+		rppi_vlan_info->u1.s1.vlan_id =
+			packet->vlan_tci & 0xfff;
+	}
 
-		/* Only check the flags for outbound and ignore the ones for inbound */
-		if (0 == (m_head->m_pkthdr.csum_flags & HV_CSUM_FOR_OUTBOUND)) {
-			goto pre_send;
-		}
-
-		eh = mtod(m_head, struct ether_vlan_header*);
-		if (eh->evl_encap_proto == htons(ETHERTYPE_VLAN)) {
-			ether_len = ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN;
-		} else {
-			ether_len = ETHER_HDR_LEN;
-		}
-
-		trans_proto_type = get_transport_proto_type(m_head);
-		if (TRANSPORT_TYPE_NOT_IP == trans_proto_type) {
-			goto pre_send;
-		}
-
-		/*
-		 * TSO packet needless to setup the send side checksum
-		 * offload.
-		 */
-		if (m_head->m_pkthdr.csum_flags & CSUM_TSO) {
-			goto do_tso;
-		}
-
-		/* setup checksum offload */
-		rndis_msg_size += RNDIS_CSUM_PPI_SIZE;
-		rppi = hv_set_rppi_data(rndis_mesg, RNDIS_CSUM_PPI_SIZE,
-		    tcpip_chksum_info);
-		csum_info = (rndis_tcp_ip_csum_info *)((char*)rppi +
-		    rppi->per_packet_info_offset);
-
-		if (trans_proto_type & (TYPE_IPV4 << 16)) {
-			csum_info->xmit.is_ipv4 = 1;
-		} else {
-			csum_info->xmit.is_ipv6 = 1;
-		}
-
-		if (trans_proto_type & TYPE_TCP) {
-			csum_info->xmit.tcp_csum = 1;
-			csum_info->xmit.tcp_header_offset = 0;
-		} else if (trans_proto_type & TYPE_UDP) {
-			csum_info->xmit.udp_csum = 1;
-		}
-
+	if (M_HASHTYPE_GET(m_head) != M_HASHTYPE_NONE) {
+		packet->hash = m_head->m_pkthdr.flowid;
+		rndis_msg_size += RNDIS_HASH_PPI_SIZE;
+		rppi = hv_set_rppi_data(rndis_mesg, RNDIS_HASH_PPI_SIZE,
+					nbl_hash_value);
+		*(uint32_t *)((unsigned long)rppi + rppi->per_packet_info_offset) = packet->hash;
+	}
+	
+	if (0 == m_head->m_pkthdr.csum_flags) {
 		goto pre_send;
+	}
+
+	eh = mtod(m_head, struct ether_vlan_header*);
+	if (eh->evl_encap_proto == htons(ETHERTYPE_VLAN)){
+		ether_len = ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN;
+	} else{
+		ether_len = ETHER_HDR_LEN;
+	}
+
+	trans_proto_type = get_transport_proto_type(m_head);
+	if (TRANSPORT_TYPE_NOT_IP == trans_proto_type){
+		goto pre_send;
+	}
+
+	/*
+	 * TSO packet needless to setup the send side checksum
+	 * offload.
+	 */
+	if (m_head->m_pkthdr.csum_flags & CSUM_TSO) {
+		goto do_tso;
+	}
+
+	/* setup checksum offload */
+	rndis_msg_size += RNDIS_CSUM_PPI_SIZE;
+	rppi = hv_set_rppi_data(rndis_mesg, RNDIS_CSUM_PPI_SIZE,
+					tcpip_chksum_info);
+	csum_info = (rndis_tcp_ip_csum_info *)((char*)rppi +
+							rppi->per_packet_info_offset);
+
+	if (trans_proto_type & (TYPE_IPV4 << 16)) {
+		csum_info->xmit.is_ipv4 = 1;
+	} else{
+		csum_info->xmit.is_ipv6 = 1;
+	}
+
+	if (trans_proto_type & TYPE_TCP) {
+		csum_info->xmit.tcp_csum = 1;
+		csum_info->xmit.tcp_header_offset = 0;
+	} else if (trans_proto_type & TYPE_UDP) {
+		csum_info->xmit.udp_csum = 1;
+	}
+
+	goto pre_send;
 
 do_tso:
-		/* setup TCP segmentation offload */
-		rndis_msg_size += RNDIS_TSO_PPI_SIZE;
-		rppi = hv_set_rppi_data(rndis_mesg, RNDIS_TSO_PPI_SIZE,
-		    tcp_large_send_info);
-		
-		tso_info = (rndis_tcp_tso_info *)((char *)rppi +
-		    rppi->per_packet_info_offset);
-		tso_info->lso_v2_xmit.type =
-		    RNDIS_TCP_LARGE_SEND_OFFLOAD_V2_TYPE;
-		
+	/* setup TCP segmentation offload */
+	rndis_msg_size += RNDIS_TSO_PPI_SIZE;
+	rppi = hv_set_rppi_data(rndis_mesg, RNDIS_TSO_PPI_SIZE,
+				tcp_large_send_info);
+	
+	tso_info = (rndis_tcp_tso_info *)((char *)rppi +
+		rppi->per_packet_info_offset);
+	tso_info->lso_v2_xmit.type =
+		RNDIS_TCP_LARGE_SEND_OFFLOAD_V2_TYPE;
+	
 #ifdef INET
-		if (trans_proto_type & (TYPE_IPV4 << 16)) {
-			struct ip *ip =
-			    (struct ip *)(m_head->m_data + ether_len);
-			unsigned long iph_len = ip->ip_hl << 2;
-			struct tcphdr *th =
-			    (struct tcphdr *)((caddr_t)ip + iph_len);
-		
-			tso_info->lso_v2_xmit.ip_version =
-			    RNDIS_TCP_LARGE_SEND_OFFLOAD_IPV4;
-			ip->ip_len = 0;
-			ip->ip_sum = 0;
-		
-			th->th_sum = in_pseudo(ip->ip_src.s_addr,
-			    ip->ip_dst.s_addr,
-			    htons(IPPROTO_TCP));
+	if (trans_proto_type & (TYPE_IPV4 << 16)) {
+		struct ip *ip =
+			(struct ip *)(m_head->m_data + ether_len);
+		unsigned long iph_len = ip->ip_hl << 2;
+		struct tcphdr *th =
+			(struct tcphdr *)((caddr_t)ip + iph_len);
+	
+		tso_info->lso_v2_xmit.ip_version =
+			RNDIS_TCP_LARGE_SEND_OFFLOAD_IPV4;
+		ip->ip_len = 0;
+		ip->ip_sum = 0;
+	
+		th->th_sum = in_pseudo(ip->ip_src.s_addr,
+				ip->ip_dst.s_addr,
+				htons(IPPROTO_TCP));
 		}
 #endif
 #if defined(INET6) && defined(INET)
-		else
+	else
 #endif
 #ifdef INET6
-		{
-			struct ip6_hdr *ip6 =
-			    (struct ip6_hdr *)(m_head->m_data + ether_len);
-			struct tcphdr *th = (struct tcphdr *)(ip6 + 1);
+	{
+		struct ip6_hdr *ip6 =
+			(struct ip6_hdr *)(m_head->m_data + ether_len);
+		struct tcphdr *th = (struct tcphdr *)(ip6 + 1);
 
-			tso_info->lso_v2_xmit.ip_version =
-			    RNDIS_TCP_LARGE_SEND_OFFLOAD_IPV6;
-			ip6->ip6_plen = 0;
-			th->th_sum = in6_cksum_pseudo(ip6, 0, IPPROTO_TCP, 0);
-		}
+		tso_info->lso_v2_xmit.ip_version =
+			RNDIS_TCP_LARGE_SEND_OFFLOAD_IPV6;
+		ip6->ip6_plen = 0;
+		th->th_sum = in6_cksum_pseudo(ip6, 0, IPPROTO_TCP, 0);
+	}
 #endif
-		tso_info->lso_v2_xmit.tcp_header_offset = 0;
-		tso_info->lso_v2_xmit.mss = m_head->m_pkthdr.tso_segsz;
+	tso_info->lso_v2_xmit.tcp_header_offset = 0;
+	tso_info->lso_v2_xmit.mss = m_head->m_pkthdr.tso_segsz;
 
 pre_send:
-		rndis_mesg->msg_len = packet->tot_data_buf_len + rndis_msg_size;
-		packet->tot_data_buf_len = rndis_mesg->msg_len;
+	rndis_mesg->msg_len = packet->tot_data_buf_len + rndis_msg_size;
+	packet->tot_data_buf_len = rndis_mesg->msg_len;
 
-		/* send packet with send buffer */
-		if (packet->tot_data_buf_len < net_dev->send_section_size) {
-			send_buf_section_idx =
-			    hv_nv_get_next_send_section(net_dev);
-			if (send_buf_section_idx !=
-			    NVSP_1_CHIMNEY_SEND_INVALID_SECTION_INDEX) {
-				char *dest = ((char *)net_dev->send_buf +
-				    send_buf_section_idx *
-				    net_dev->send_section_size);
+	/* send packet with send buffer */
+	if (packet->tot_data_buf_len < net_dev->send_section_size) {
+		send_buf_section_idx =
+		    hv_nv_get_next_send_section(net_dev);
+		if (send_buf_section_idx !=
+		    NVSP_1_CHIMNEY_SEND_INVALID_SECTION_INDEX) {
+			char *dest = ((char *)net_dev->send_buf +
+			    send_buf_section_idx *
+			    net_dev->send_section_size);
 
-				memcpy(dest, rndis_mesg, rndis_msg_size);
-				dest += rndis_msg_size;
-				for (m = m_head; m != NULL; m = m->m_next) {
-					if (m->m_len) {
-						memcpy(dest,
-						    (void *)mtod(m, vm_offset_t),
-						    m->m_len);
-						dest += m->m_len;
-					}
+			memcpy(dest, rndis_mesg, rndis_msg_size);
+			dest += rndis_msg_size;
+			for (m = m_head; m != NULL; m = m->m_next) {
+				if (m->m_len) {
+					memcpy(dest,
+					    (void *)mtod(m, vm_offset_t),
+					    m->m_len);
+					dest += m->m_len;
 				}
-
-				packet->send_buf_section_idx =
-				    send_buf_section_idx;
-				packet->send_buf_section_size =
-				    packet->tot_data_buf_len;
-				packet->page_buf_count = 0;
-				goto do_send;
 			}
+
+			packet->send_buf_section_idx =
+			    send_buf_section_idx;
+			packet->send_buf_section_size =
+			    packet->tot_data_buf_len;
+			packet->page_buf_count = 0;
+			goto do_send;
 		}
+	}
 
-		/* send packet with page buffer */
-		packet->page_buffers[0].pfn =
-		    atop(hv_get_phys_addr(rndis_mesg));
-		packet->page_buffers[0].offset =
-		    (unsigned long)rndis_mesg & PAGE_MASK;
-		packet->page_buffers[0].length = rndis_msg_size;
+	/* send packet with page buffer */
+	packet->page_buffers[0].pfn =
+		atop(hv_get_phys_addr(rndis_mesg));
+	packet->page_buffers[0].offset =
+		(unsigned long)rndis_mesg & PAGE_MASK;
+	packet->page_buffers[0].length = rndis_msg_size;
 
-		/*
-		 * Fill the page buffers with mbuf info starting at index
-		 * HV_RF_NUM_TX_RESERVED_PAGE_BUFS.
-		 */
-		i = HV_RF_NUM_TX_RESERVED_PAGE_BUFS;
-		for (m = m_head; m != NULL; m = m->m_next) {
-			if (m->m_len) {
-				vm_offset_t paddr =
-				    vtophys(mtod(m, vm_offset_t));
-				packet->page_buffers[i].pfn =
-				    paddr >> PAGE_SHIFT;
-				packet->page_buffers[i].offset =
-				    paddr & (PAGE_SIZE - 1);
-				packet->page_buffers[i].length = m->m_len;
-				i++;
-			}
+	/*
+	 * Fill the page buffers with mbuf info starting at index
+	 * HV_RF_NUM_TX_RESERVED_PAGE_BUFS.
+	 */
+	i = HV_RF_NUM_TX_RESERVED_PAGE_BUFS;
+	for (m = m_head; m != NULL; m = m->m_next) {
+		if (m->m_len) {
+			vm_offset_t paddr =
+				vtophys(mtod(m, vm_offset_t));
+			packet->page_buffers[i].pfn =
+				paddr >> PAGE_SHIFT;
+			packet->page_buffers[i].offset =
+				paddr & (PAGE_SIZE - 1);
+			packet->page_buffers[i].length = m->m_len;
+			i++;
 		}
+	}
 
-		packet->send_buf_section_idx = 
-		    NVSP_1_CHIMNEY_SEND_INVALID_SECTION_INDEX;
-		packet->send_buf_section_size = 0;
-
+	packet->send_buf_section_idx = 
+		NVSP_1_CHIMNEY_SEND_INVALID_SECTION_INDEX;
+	packet->send_buf_section_size = 0;
 do_send:
 
-		/*
-		 * If bpf, copy the mbuf chain.  This is less expensive than
-		 * it appears; the mbuf clusters are not copied, only their
-		 * reference counts are incremented.
-		 * Needed to avoid a race condition where the completion
-		 * callback is invoked, freeing the mbuf chain, before the
-		 * bpf_mtap code has a chance to run.
-		 */
-		if (ifp->if_bpf) {
-			mc_head = m_copypacket(m_head, M_NOWAIT);
-		}
+	/*
+	 * If bpf, copy the mbuf chain.  This is less expensive than
+	 * it appears; the mbuf clusters are not copied, only their
+	 * reference counts are incremented.
+	 * Needed to avoid a race condition where the completion
+	 * callback is invoked, freeing the mbuf chain, before the
+	 * bpf_mtap code has a chance to run.
+	 */
+	if (ifp->if_bpf) {
+		mc_head = m_copypacket(m_head, M_NOWAIT);
+	}
+
 retry_send:
-		/* Set the completion routine */
-		packet->compl.send.on_send_completion = netvsc_xmit_completion;
-		packet->compl.send.send_completion_context = packet;
+	/* Set the completion routine */
+	packet->compl.send.on_send_completion = netvsc_xmit_completion;
+	packet->compl.send.send_completion_context = packet;
+	packet->compl.send.send_completion_tid = (uint64_t)(uintptr_t)m_head;
+
+	/* Removed critical_enter(), does not appear necessary */
+	ret = hv_nv_on_send(device_ctx, packet);
+
+	if (ret == 0) {
+		if_inc_counter(ifp, IFCOUNTER_OPACKETS, 1);
+		/* if bpf && mc_head, call bpf_mtap code */
+		if (mc_head) {
+			ETHER_BPF_MTAP(ifp, mc_head);
+		}
+	} else {
+		retries++;
+		if (retries < 4) {
+			goto retry_send;
+		}
+
+		ifp->if_drv_flags |= IFF_DRV_OACTIVE;
+
+		/*
+		 * Null the mbuf pointer so the completion function
+		 * does not free the mbuf chain.  We just pushed the
+		 * mbuf chain back on the if_snd queue.
+		 */
 		packet->compl.send.send_completion_tid = (uint64_t)(uintptr_t)m_head;
 
-		/* Removed critical_enter(), does not appear necessary */
-		ret = hv_nv_on_send(device_ctx, packet);
-		if (ret == 0) {
-			if_inc_counter(ifp, IFCOUNTER_OPACKETS, 1);
-			/* if bpf && mc_head, call bpf_mtap code */
-			if (mc_head) {
-				ETHER_BPF_MTAP(ifp, mc_head);
-			}
-		} else {
-			retries++;
-			if (retries < 4) {
-				goto retry_send;
-			}
-
-			IF_PREPEND(&ifp->if_snd, m_head);
-			ifp->if_drv_flags |= IFF_DRV_OACTIVE;
-
-			/*
-			 * Null the mbuf pointer so the completion function
-			 * does not free the mbuf chain.  We just pushed the
-			 * mbuf chain back on the if_snd queue.
-			 */
-			packet->compl.send.send_completion_tid = 0;
-
-			/*
-			 * Release the resources since we will not get any
-			 * send completion
-			 */
-			netvsc_xmit_completion(packet);
+		/*
+		 * Release the resources since we will not get any
+		 * send completion
+		 */
+		netvsc_xmit_completion(packet);
 			if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
-		}
+	}
 
-		/* if bpf && mc_head, free the mbuf chain copy */
-		if (mc_head) {
-			m_freem(mc_head);
-		}
+	/* if bpf && mc_head, free the mbuf chain copy */
+	if (mc_head) {
+		m_freem(mc_head);
 	}
 
 	return (ret);
 }
 
+/*
+ * Start a tranmit of one or more packets on a queue
+ */
+static int
+hn_mq_start_locked(struct ifnet *ifp, tx_chn *txq)
+{
+	struct mbuf *next;
+	int ret = 0;
+
+	if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0) {
+		return (ENETDOWN);
+	}
+
+	/* Process the queue */
+	while ((next = drbr_dequeue(ifp, txq->txq_br)) != NULL) {
+		if ((ret = hn_xmit(ifp, next, txq)) != 0) {
+			break;
+		}
+	}
+
+	return (ret);
+}
 /*
  * Link up/down notification
  */
@@ -1206,22 +1264,152 @@ hn_stop(hn_softc_t *sc)
 	ret = hv_rf_on_close(device_ctx);
 }
 
+union sub_key {
+	uint64_t k;
+	struct {
+		uint8_t pad[3];
+		uint8_t kb;
+		uint32_t ka;
+	};
+};
+
 /*
- * FreeBSD transmit entry point
+ * Toeplitz hash function
+ * data: network byte order
+ * return: host byte order
  */
-static void
-hn_start(struct ifnet *ifp)
+static uint32_t
+hn_comp_hash(uint8_t *key, int key_len, void *datap, int data_len)
+{
+	union sub_key subk;
+	int k_next = 4;
+	uint8_t dt;
+	int i, j;
+	uint32_t ret = 0;
+
+	subk.k = 0;
+	subk.ka = ntohl(*(uint32_t *)key);
+
+	for (i = 0; i < data_len; i++) {
+		subk.kb = key[k_next];
+		k_next = (k_next + 1) % key_len;
+		dt = ((uint8_t *)datap)[i];
+		for (j = 0; j < 8; j++) {
+			if (dt & 0x80)
+				ret ^= subk.ka;
+			dt <<= 1;
+			subk.k <<= 1;
+		}
+	}
+
+	return ret;
+}
+
+static int
+hn_select_outgoing_idx(netvsc_dev *net_dev, struct mbuf *m)
+{
+	int q_idx = 0;
+	struct ether_header *eh = NULL;
+	struct ip *ip;
+	struct tcphdr *th;
+	uint8_t data[12]; 
+	uint8_t *port_src, *d; 
+	uint32_t hash;
+	int data_len;
+
+	if (net_dev->num_channel < 1)
+		return (0);
+
+ 	if (m->m_flags & M_PKTHDR)
+		eh = mtod(m, struct ether_header *);
+
+	if (eh && eh->ether_type == htons(ETHERTYPE_IP)) {
+		ip = (struct ip *) mtodo(m, ETHER_HDR_LEN);		
+		th = (struct tcphdr *)((unsigned long)ip + (unsigned long)(ip->ip_hl << 2));
+		if (ip->ip_p == IPPROTO_TCP) {
+			data_len = 12;
+			if ((4 * ip->ip_hl) != sizeof(struct ip)) {
+				/*
+				 * IP header contains option field. Need to
+				 * copy the src/dst for ip addrs and ports
+				 * to a memory buf.
+				 */
+				port_src = (uint8_t *) mtodo(m,
+				    ETHER_HDR_LEN + (4 * ip->ip_hl));
+				memcpy(data, &ip->ip_src, 8);	
+				memcpy(&data[8], port_src, 4);
+				d = data;
+			} else {
+				memcpy(data, &ip->ip_src, 8);
+				memcpy(&data[8], &th->th_sport, 4);
+				d = data;
+			}
+		} else {
+			data_len = 8;
+			d = (uint8_t *)&ip->ip_src;
+		}
+
+		hash = hn_comp_hash(netvsc_hash_key, HASH_KEYLEN,
+		    d, data_len);
+		q_idx = net_dev->vrss_send_table[hash % VRSS_SEND_TABLE_SIZE] %
+		    net_dev->num_channel;
+		
+        m->m_pkthdr.flowid = hash;
+        M_HASHTYPE_SET(m, M_HASHTYPE_OPAQUE);
+	}
+	
+	return (q_idx);
+} 
+
+/*
+ * FreeBSD multiqueue transmit entry point
+ */
+static int
+hn_mq_start(struct ifnet *ifp, struct mbuf *m)
 {
 	hn_softc_t *sc;
+	netvsc_dev *net_dev;
+	hv_vmbus_channel *outgoing_channel;
+	int cpu = PCPU_GET(cpuid);
+	int err = 0;	
+
+	if (m == NULL) {
+		return(0);
+	}
 
 	sc = ifp->if_softc;
-	NV_LOCK(sc);
-	if (sc->temp_unusable) {
-		NV_UNLOCK(sc);
-		return;
+	net_dev = sc->net_dev;
+
+	/* Which channel to use */
+	int q_idx;
+
+	q_idx = hn_select_outgoing_idx(net_dev, m);
+
+	if (q_idx >= MAXCPU) {
+		m_freem(m);
+		return 0;
 	}
-	hn_start_locked(ifp);
-	NV_UNLOCK(sc);
+
+	outgoing_channel = net_dev->channel_table[q_idx];
+	net_dev->queue_sends[q_idx] ++;
+
+	KASSERT(outgoing_channel != NULL, ("Netvsc: outgoing_channel == NULL"));
+	cpu = outgoing_channel->target_cpu;
+
+	err = drbr_enqueue(ifp, net_dev->txq[cpu].txq_br, m);
+	if (err) {
+		return (err);
+	}
+
+	if (mtx_trylock(&net_dev->txq[cpu].txq_mtx)) {
+		hn_mq_start_locked(ifp, &net_dev->txq[cpu]);
+		mtx_unlock(&net_dev->txq[cpu].txq_mtx);
+	} else {
+		taskqueue_enqueue(net_dev->txq[cpu].txq_tq,
+		     &net_dev->txq[cpu].txq_task);
+	}	
+
+	return(0);
 }
 
 /*

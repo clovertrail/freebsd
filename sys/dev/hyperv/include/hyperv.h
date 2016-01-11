@@ -983,6 +983,7 @@ typedef struct hv_vmbus_service {
 extern uint8_t* receive_buffer[];
 extern hv_vmbus_service service_table[];
 extern uint32_t hv_vmbus_protocal_version;
+extern int mp_ncpus;
 
 void hv_kvp_callback(void *context);
 int hv_kvp_init(hv_vmbus_service *serv);

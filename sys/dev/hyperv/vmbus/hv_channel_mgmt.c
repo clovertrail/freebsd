@@ -395,7 +395,7 @@ enum {
  * We use this static number to distribute the channel interrupt load.
  */
 static uint32_t next_vcpu;
-
+static uint32_t next_nic_vcpu;
 /**
  * Starting with Win8, we can statically distribute the incoming
  * channel interrupt load by binding a channel to VCPU. We
@@ -430,7 +430,20 @@ vmbus_channel_select_cpu(hv_vmbus_channel *channel, hv_guid *guid)
 		return;
 	}
 	/* mp_ncpus should have the number cpus currently online */
-	current_cpu = (++next_vcpu % mp_ncpus);
+	if (i == PERF_CHN_NIC) {
+		/*
+		 * For nic channels, try to spread evenly across all
+		 * available vcpu.
+		 */
+		current_cpu = (mp_ncpus - next_nic_vcpu) % mp_ncpus;
+		if (++next_nic_vcpu > mp_ncpus)
+			next_nic_vcpu = 0;
+	} else {
+		/*
+		 * Other performance channels start from vcpu 1.
+		 */
+		current_cpu = (++next_vcpu % mp_ncpus);
+	}
 	channel->target_cpu = current_cpu;
 	channel->target_vcpu =
 	    hv_vmbus_g_context.hv_vcpu_index[current_cpu];
