@@ -31,9 +31,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "efsys.h"
 #include "efx.h"
-#include "efx_types.h"
 #include "efx_impl.h"
 
 #if EFSYS_OPT_MAC_FALCON_GMAC
@@ -115,27 +113,27 @@ static efx_mac_ops_t	__efx_siena_mac_ops = {
 };
 #endif	/* EFSYS_OPT_SIENA */
 
-#if EFSYS_OPT_HUNTINGTON
-static efx_mac_ops_t	__efx_hunt_mac_ops = {
+#if EFSYS_OPT_HUNTINGTON || EFSYS_OPT_MEDFORD
+static efx_mac_ops_t	__efx_ef10_mac_ops = {
 	NULL,					/* emo_reset */
-	hunt_mac_poll,				/* emo_poll */
-	hunt_mac_up,				/* emo_up */
-	hunt_mac_addr_set,			/* emo_addr_set */
-	hunt_mac_reconfigure,			/* emo_reconfigure */
-	hunt_mac_multicast_list_set,		/* emo_multicast_list_set */
-	hunt_mac_filter_default_rxq_set,	/* emo_filter_default_rxq_set */
-	hunt_mac_filter_default_rxq_clear,
+	ef10_mac_poll,				/* emo_poll */
+	ef10_mac_up,				/* emo_up */
+	ef10_mac_addr_set,			/* emo_addr_set */
+	ef10_mac_reconfigure,			/* emo_reconfigure */
+	ef10_mac_multicast_list_set,		/* emo_multicast_list_set */
+	ef10_mac_filter_default_rxq_set,	/* emo_filter_default_rxq_set */
+	ef10_mac_filter_default_rxq_clear,
 					/* emo_filter_default_rxq_clear */
 #if EFSYS_OPT_LOOPBACK
-	hunt_mac_loopback_set,			/* emo_loopback_set */
+	ef10_mac_loopback_set,			/* emo_loopback_set */
 #endif	/* EFSYS_OPT_LOOPBACK */
 #if EFSYS_OPT_MAC_STATS
 	efx_mcdi_mac_stats_upload,		/* emo_stats_upload */
 	efx_mcdi_mac_stats_periodic,		/* emo_stats_periodic */
-	hunt_mac_stats_update			/* emo_stats_update */
+	ef10_mac_stats_update			/* emo_stats_update */
 #endif	/* EFSYS_OPT_MAC_STATS */
 };
-#endif	/* EFSYS_OPT_HUNTINGTON */
+#endif	/* EFSYS_OPT_HUNTINGTON || EFSYS_OPT_MEDFORD */
 
 static efx_mac_ops_t	*__efx_mac_ops[] = {
 	/* [EFX_MAC_INVALID] */
@@ -160,7 +158,13 @@ static efx_mac_ops_t	*__efx_mac_ops[] = {
 #endif
 	/* [EFX_MAC_HUNTINGTON] */
 #if EFSYS_OPT_HUNTINGTON
-	&__efx_hunt_mac_ops,
+	&__efx_ef10_mac_ops,
+#else
+	NULL,
+#endif
+	/* [EFX_MAC_MEDFORD] */
+#if EFSYS_OPT_MEDFORD
+	&__efx_ef10_mac_ops,
 #else
 	NULL,
 #endif
@@ -460,55 +464,6 @@ efx_mac_fcntl_get(
 
 	*fcntl_linkp = epp->ep_fcntl;
 	*fcntl_wantedp = wanted;
-}
-
-/*
- * FIXME: efx_mac_hash_set() should be deleted once all its callers have been
- * updated to use efx_mac_multicast_list_set().
- * Then efx_port_t.ep_multicst_hash could be made Falcon/Siena specific as
- * well.
- */
-	__checkReturn			efx_rc_t
-efx_mac_hash_set(
-	__in				efx_nic_t *enp,
-	__in_ecount(EFX_MAC_HASH_BITS)	unsigned int const *bucket)
-{
-	efx_port_t *epp = &(enp->en_port);
-	efx_mac_ops_t *emop = epp->ep_emop;
-	efx_oword_t old_hash[2];
-	unsigned int index;
-	efx_rc_t rc;
-
-	EFSYS_ASSERT3U(enp->en_magic, ==, EFX_NIC_MAGIC);
-	EFSYS_ASSERT3U(enp->en_mod_flags, &, EFX_MOD_PORT);
-
-	memcpy(old_hash, epp->ep_multicst_hash, sizeof (old_hash));
-
-	/* Set the lower 128 bits of the hash */
-	EFX_ZERO_OWORD(epp->ep_multicst_hash[0]);
-	for (index = 0; index < 128; index++) {
-		if (bucket[index] != 0)
-			EFX_SET_OWORD_BIT(epp->ep_multicst_hash[0], index);
-	}
-
-	/* Set the upper 128 bits of the hash */
-	EFX_ZERO_OWORD(epp->ep_multicst_hash[1]);
-	for (index = 0; index < 128; index++) {
-		if (bucket[index + 128] != 0)
-			EFX_SET_OWORD_BIT(epp->ep_multicst_hash[1], index);
-	}
-
-	if ((rc = emop->emo_reconfigure(enp)) != 0)
-		goto fail1;
-
-	return (0);
-
-fail1:
-	EFSYS_PROBE1(fail1, efx_rc_t, rc);
-
-	memcpy(epp->ep_multicst_hash, old_hash, sizeof (old_hash));
-
-	return (rc);
 }
 
 	__checkReturn	efx_rc_t
@@ -832,6 +787,13 @@ efx_mac_select(
 	efx_mac_ops_t *emop;
 	int rc = EINVAL;
 
+#if EFSYS_OPT_SIENA
+	if (enp->en_family == EFX_FAMILY_SIENA) {
+		type = EFX_MAC_SIENA;
+		goto chosen;
+	}
+#endif
+
 #if EFSYS_OPT_HUNTINGTON
 	if (enp->en_family == EFX_FAMILY_HUNTINGTON) {
 		type = EFX_MAC_HUNTINGTON;
@@ -839,9 +801,9 @@ efx_mac_select(
 	}
 #endif
 
-#if EFSYS_OPT_SIENA
-	if (enp->en_family == EFX_FAMILY_SIENA) {
-		type = EFX_MAC_SIENA;
+#if EFSYS_OPT_MEDFORD
+	if (enp->en_family == EFX_FAMILY_MEDFORD) {
+		type = EFX_MAC_MEDFORD;
 		goto chosen;
 	}
 #endif
@@ -911,6 +873,8 @@ fail1:
 
 
 #if EFSYS_OPT_FALCON || EFSYS_OPT_SIENA
+
+#define	EFX_MAC_HASH_BITS	(1 << 8)
 
 /* Compute the multicast hash as used on Falcon and Siena. */
 static	void
