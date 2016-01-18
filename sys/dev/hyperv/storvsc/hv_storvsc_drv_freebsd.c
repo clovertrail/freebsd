@@ -1924,6 +1924,59 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 }
 
 /**
+ * Modified based on scsi_print_inquiry which is responsible to
+ * print the detail information for scsi_inquiry_data
+ * return 1 if it is valid, 0 otherwise.
+ */
+static inline int
+is_scsi_valid(struct scsi_inquiry_data *inq_data)
+{
+        int ret = 0;
+        u_int8_t type;
+        char vendor[16], product[48], revision[16];
+        type = SID_TYPE(inq_data);
+        switch (type) {
+        case T_DIRECT:
+        case T_SEQUENTIAL:
+        case T_PRINTER:
+        case T_PROCESSOR:
+        case T_WORM:
+        case T_CDROM:
+        case T_SCANNER:
+        case T_OPTICAL:
+        case T_CHANGER:
+        case T_COMM:
+        case T_STORARRAY:
+        case T_ENCLOSURE:
+        case T_RBC:
+        case T_OCRW:
+        case T_OSD:
+        case T_ADC:
+                ret = 1;
+                break;
+        case T_NODEVICE:
+                ret = 0;
+                break;
+        default:
+                ret = 0;
+        }
+        if (!ret) {
+                return (ret);
+        }
+        cam_strvis(vendor, inq_data->vendor, sizeof(inq_data->vendor),
+                   sizeof(vendor));
+        cam_strvis(product, inq_data->product, sizeof(inq_data->product),
+                   sizeof(product));
+        cam_strvis(revision, inq_data->revision, sizeof(inq_data->revision),
+                   sizeof(revision));
+        if (strlen(vendor) == 0  ||
+            strlen(product) == 0 ||
+            strlen(revision) == 0) {
+                ret = 0;
+        }
+        return (ret);
+}
+/**
  * @brief completion function before returning to CAM
  *
  * I/O process has been completed and the result needs
@@ -1941,6 +1994,7 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 	struct vmscsi_req *vm_srb = &reqp->vstor_packet.u.vm_srb;
 	bus_dma_segment_t *ori_sglist = NULL;
 	int ori_sg_count = 0;
+	struct scsi_inquiry_data *inq_data = &(ccb->ccb_h.path->device->inq_data);
 
 	/* destroy bounce buffer if it is used */
 	if (reqp->bounce_sgl_count) {
@@ -1992,12 +2046,12 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 
 	ccb->ccb_h.status &= ~CAM_SIM_QUEUED;
 	ccb->ccb_h.status &= ~CAM_STATUS_MASK;
-	if (vm_srb->scsi_status == SCSI_STATUS_OK) {
+	if (vm_srb->scsi_status == SCSI_STATUS_OK && is_scsi_valid(inq_data)) {
 		ccb->ccb_h.status |= CAM_REQ_CMP;
 	 } else {
 		mtx_lock(&sc->hs_lock);
 		xpt_print(ccb->ccb_h.path,
-			"srovsc scsi_status = %d\n",
+			"storvsc scsi_status = %d\n",
 			vm_srb->scsi_status);
 		mtx_unlock(&sc->hs_lock);
 		ccb->ccb_h.status |= CAM_SCSI_STATUS_ERROR;
