@@ -1934,17 +1934,14 @@ is_scsi_valid(struct scsi_inquiry_data *inq_data)
         int ret = 0;
         u_int8_t type;
         char vendor[16], product[48], revision[16];
-	u_int8_t qualifier;
 	/**
 	 * Check device type and qualifier
 	 */
-	qualifier = SID_QUAL(inq_data);
-	if (qualifier == SID_QUAL_LU_OFFLINE ||
-	    qualifier == SID_QUAL_RSVD ||
-	    qualifier == SID_QUAL_BAD_LU) {
-		ret = 0;
-	} else {
+	if (SID_QUAL_IS_VENDOR_UNIQUE(inq_data) ||
+	    SID_QUAL(inq_data) == SID_QUAL_LU_CONNECTED) {
 		ret = 1;
+	} else {
+		ret = 0;
 	}
 	if (ret == 0) {
 		return (ret);
