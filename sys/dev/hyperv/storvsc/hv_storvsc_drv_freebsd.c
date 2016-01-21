@@ -1931,8 +1931,8 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 static inline int
 is_scsi_valid(const struct scsi_inquiry_data *inq_data)
 {
-        u_int8_t type;
-        char vendor[16], product[48], revision[16];
+	u_int8_t type;
+	char vendor[16], product[48], revision[16];
 	/**
 	 * Check device type and qualifier
 	 */
