@@ -1941,45 +1941,45 @@ is_scsi_valid(const struct scsi_inquiry_data *inq_data)
 		return (0);
 	}
 
-        type = SID_TYPE(inq_data);
-        switch (type) {
-        case T_DIRECT:
-        case T_SEQUENTIAL:
-        case T_PRINTER:
-        case T_PROCESSOR:
-        case T_WORM:
-        case T_CDROM:
-        case T_SCANNER:
-        case T_OPTICAL:
-        case T_CHANGER:
-        case T_COMM:
-        case T_STORARRAY:
-        case T_ENCLOSURE:
-        case T_RBC:
-        case T_OCRW:
-        case T_OSD:
-        case T_ADC:
-                break;
-        case T_NODEVICE:
-                return (0);
-        default:
-                return (0);
-        }
+	type = SID_TYPE(inq_data);
+	switch (type) {
+	case T_DIRECT:
+	case T_SEQUENTIAL:
+	case T_PRINTER:
+	case T_PROCESSOR:
+	case T_WORM:
+	case T_CDROM:
+	case T_SCANNER:
+	case T_OPTICAL:
+	case T_CHANGER:
+	case T_COMM:
+	case T_STORARRAY:
+	case T_ENCLOSURE:
+	case T_RBC:
+	case T_OCRW:
+	case T_OSD:
+	case T_ADC:
+		break;
+	case T_NODEVICE:
+		return (0);
+	default:
+		return (0);
+	}
 	/**
 	 * Check vendor, product, and revision
 	 */
-        cam_strvis(vendor, inq_data->vendor, sizeof(inq_data->vendor),
-                   sizeof(vendor));
-        cam_strvis(product, inq_data->product, sizeof(inq_data->product),
-                   sizeof(product));
-        cam_strvis(revision, inq_data->revision, sizeof(inq_data->revision),
-                   sizeof(revision));
-        if (strlen(vendor) == 0  ||
-            strlen(product) == 0 ||
-            strlen(revision) == 0) {
-                return (0);
-        }
-        return (1);
+	cam_strvis(vendor, inq_data->vendor, sizeof(inq_data->vendor),
+		   sizeof(vendor));
+	cam_strvis(product, inq_data->product, sizeof(inq_data->product),
+		   sizeof(product));
+	cam_strvis(revision, inq_data->revision, sizeof(inq_data->revision),
+		   sizeof(revision));
+	if (strlen(vendor) == 0  ||
+	    strlen(product) == 0 ||
+	    strlen(revision) == 0) {
+		return (0);
+	}
+	return (1);
 }
 /**
  * @brief completion function before returning to CAM
