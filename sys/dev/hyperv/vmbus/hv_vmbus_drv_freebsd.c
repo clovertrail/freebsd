@@ -69,13 +69,13 @@ static int vmbus_inited;
 static hv_setup_args setup_args; /* only CPU 0 supported at this time */
 
 static char *vmbus_ids[] = { "VMBUS", NULL };
-
+//void vmbus_msg_swintr(void *arg, int pending);
 /**
  * @brief Software interrupt thread routine to handle channel messages from
  * the hypervisor.
  */
 static void
-vmbus_msg_swintr(void *arg)
+vmbus_msg_swintr(void *arg, int pending)
 {
 	int 			cpu;
 	void*			page_addr;
@@ -219,7 +219,7 @@ hv_vmbus_isr(struct trapframe *frame)
 	}
 
 	if (msg->header.message_type != HV_MESSAGE_TYPE_NONE) {
-		swi_sched(hv_vmbus_g_context.msg_swintr[cpu], 0);
+		taskqueue_enqueue_fast(hv_vmbus_g_context.hv_msg_queue[cpu], &hv_vmbus_g_context.hv_msg_task[cpu]);
 	}
 
 	return (FILTER_HANDLED);
@@ -510,9 +510,7 @@ vmbus_bus_init(void)
 	CPU_FOREACH(j) {
 		hv_vmbus_swintr_event_cpu[j] = 0;
 		hv_vmbus_g_context.hv_event_intr_event[j] = NULL;
-		hv_vmbus_g_context.hv_msg_intr_event[j] = NULL;
 		hv_vmbus_g_context.event_swintr[j] = NULL;
-		hv_vmbus_g_context.msg_swintr[j] = NULL;
 
 		snprintf(buf, sizeof(buf), "cpu%d:hyperv", j);
 		intrcnt_add(buf, &hv_vmbus_intr_cpu[j]);
@@ -525,6 +523,23 @@ vmbus_bus_init(void)
 	 * Per cpu setup.
 	 */
 	CPU_FOREACH(j) {
+		hv_vmbus_g_context.hv_msg_queue[j] = taskqueue_create_fast("hyperv msg",
+			M_WAITOK, taskqueue_thread_enqueue, &hv_vmbus_g_context.hv_msg_queue[j]);
+		if (hv_vmbus_g_context.hv_msg_queue[j] == NULL) {
+			if(bootverbose)
+				printf("VMBUS: failed to create message task queue for "
+					"cpu %d\n", j);
+			goto cleanup1;
+		}
+		if (taskqueue_start_threads(&hv_vmbus_g_context.hv_msg_queue[j], 1,
+			PI_DISK, "hvmsg%d", j) != 0) {
+			if(bootverbose)
+				printf("VMBUS: fail to start message task queue for "
+					"cpu %d\n", j);
+			goto cleanup1;
+		}
+		TASK_INIT(&hv_vmbus_g_context.hv_msg_task[j], 0, vmbus_msg_swintr, (void *)(long)j);
+		#if 0
 		/*
 		 * Setup software interrupt thread and handler for msg handling.
 		 */
@@ -549,7 +564,7 @@ vmbus_bus_init(void)
 				    "to cpu %d\n", j);
 			goto cleanup1;
 		}
-
+		#endif
 		/*
 		 * Setup software interrupt thread and handler for
 		 * event handling.
@@ -614,11 +629,12 @@ vmbus_bus_init(void)
 	 * remove swi and vmbus callback vector;
 	 */
 	CPU_FOREACH(j) {
-		if (hv_vmbus_g_context.msg_swintr[j] != NULL)
-			swi_remove(hv_vmbus_g_context.msg_swintr[j]);
 		if (hv_vmbus_g_context.event_swintr[j] != NULL)
 			swi_remove(hv_vmbus_g_context.event_swintr[j]);
-		hv_vmbus_g_context.hv_msg_intr_event[j] = NULL;	
+		if (hv_vmbus_g_context.hv_msg_queue[j] != NULL) {
+			taskqueue_free(hv_vmbus_g_context.hv_msg_queue[j]);
+			hv_vmbus_g_context.hv_msg_queue[j] = NULL;
+		}
 		hv_vmbus_g_context.hv_event_intr_event[j] = NULL;	
 	}
 
@@ -684,11 +700,12 @@ vmbus_bus_exit(void)
 
 	/* remove swi */
 	CPU_FOREACH(i) {
-		if (hv_vmbus_g_context.msg_swintr[i] != NULL)
-			swi_remove(hv_vmbus_g_context.msg_swintr[i]);
 		if (hv_vmbus_g_context.event_swintr[i] != NULL)
 			swi_remove(hv_vmbus_g_context.event_swintr[i]);
-		hv_vmbus_g_context.hv_msg_intr_event[i] = NULL;	
+		if (hv_vmbus_g_context.hv_msg_queue[i] != NULL) {
+			taskqueue_free(hv_vmbus_g_context.hv_msg_queue[i]);
+			hv_vmbus_g_context.hv_msg_queue[i] = NULL;
+		}
 		hv_vmbus_g_context.hv_event_intr_event[i] = NULL;	
 	}
 

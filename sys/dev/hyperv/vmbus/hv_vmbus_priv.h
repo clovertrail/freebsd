@@ -203,9 +203,9 @@ typedef struct {
 	 * event and msg handling.
 	 */
 	struct intr_event		*hv_event_intr_event[MAXCPU];
-	struct intr_event		*hv_msg_intr_event[MAXCPU];
+	struct taskqueue		*hv_msg_queue[MAXCPU];
+	struct task			hv_msg_task[MAXCPU];
 	void				*event_swintr[MAXCPU];
-	void				*msg_swintr[MAXCPU];
 	/*
 	 * Host use this vector to intrrupt guest for vmbus channel
 	 * event and msg.
