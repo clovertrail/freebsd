@@ -658,8 +658,22 @@ typedef struct {
 	 * vmbus connection also uses this data structure
 	 */
 	volatile uint32_t       interrupt_mask;
+
+	/*
+	 * If VSP cannot write the ring buffer for it is full,
+	 * VSP will maintain the pending content and tell VSC
+	 * the pending content length. Each time VSC finishes
+	 * reading from ring buffer, it has to check whether
+	 * the buffer has enough space for VSP to write and
+	 * inform the VSP to write the pending data.
+	 */
+	volatile uint32_t       pending_send_sz;
+
+	uint32_t                reserved1[12];
+	uint32_t		feature_bits;
+
 	/* pad it to PAGE_SIZE so that data starts on a page */
-	uint8_t                 reserved[4084];
+	uint8_t                 reserved[4028];
 
 	/*
 	 * WARNING: Ring data starts here + ring_data_start_offset

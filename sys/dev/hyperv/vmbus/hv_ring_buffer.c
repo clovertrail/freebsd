@@ -30,6 +30,8 @@
 #include <sys/param.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/kernel.h>
+#include <sys/sysctl.h>
 
 #include "hv_vmbus_priv.h"
 
@@ -37,6 +39,10 @@
 #define	HV_BYTES_AVAIL_TO_WRITE(r, w, z) ((w) >= (r))? \
 				((z) - ((w) - (r))):((r) - (w))
 
+#define PENDING_SEND_SZ_FEATURE_ENABLED 0x00001
+static int host_pending_counter = 0;
+SYSCTL_INT(_dev, OID_AUTO, host_pending_counter, CTLFLAG_RW, &host_pending_counter, 0,
+        "# occurance of pending write on host side");
 /**
  * @brief Get number of bytes available to read and to write to
  * for the specified ring buffer
@@ -244,6 +250,9 @@ hv_vmbus_ring_buffer_init(
 	ring_info->ring_buffer->read_index =
 	    ring_info->ring_buffer->write_index = 0;
 
+	ring_info->ring_buffer->feature_bits =
+		PENDING_SEND_SZ_FEATURE_ENABLED;
+
 	ring_info->ring_size = buffer_len;
 	ring_info->ring_data_size = buffer_len - sizeof(hv_vmbus_ring_buffer);
 
@@ -380,7 +389,47 @@ hv_ring_buffer_peek(
 
 	return (0);
 }
+/**
+ * In order to optimize the flow on sending side (VSP),
+ * if the ring buffer writer was blocked for insufficient space,
+ * the ring buffer reader can inform the writer once there
+ * are enough space to write.
+ *
+ * @param prev_write_sz is the lastest available write bytes.
+ * @param rbi is the ring buffer pointer.
+ * @return true if there are enough space for pending content.
+ */
+static inline boolean_t
+hv_need_to_signal_on_read(uint32_t prev_write_sz,
+			hv_vmbus_ring_buffer_info *rbi)
+{
+	uint32_t cur_write_sz;
+	uint32_t r_size;
+	uint32_t write_loc = rbi->ring_buffer->write_index;
+	uint32_t read_loc = rbi->ring_buffer->read_index;
+	uint32_t pending_sz = rbi->ring_buffer->pending_send_sz;
 
+	/*
+	 * If the other end is not blocked on write don't bother.
+	 */
+	if (pending_sz == 0)
+        	return (FALSE);
+
+	r_size = rbi->ring_data_size;
+	cur_write_sz = write_loc >= read_loc ? r_size - (write_loc - read_loc) :
+                read_loc - write_loc;
+
+	/**
+	 * There is insufficient space before last read,
+	 * and enough space shows up after that read. Then,
+	 * we need to inform VSP to write.
+	 */
+	if ((prev_write_sz < pending_sz) && (cur_write_sz >= pending_sz)) {
+		host_pending_counter++;
+        	return (TRUE);
+	}
+	return (FALSE);
+}
 /**
  * @brief Read and advance the read index.
  */
@@ -389,12 +438,14 @@ hv_ring_buffer_read(
 	hv_vmbus_ring_buffer_info*	in_ring_info,
 	void*				buffer,
 	uint32_t			buffer_len,
-	uint32_t			offset)
+	uint32_t			offset,
+	boolean_t*			signal)
 {
 	uint32_t bytes_avail_to_write;
 	uint32_t bytes_avail_to_read;
 	uint32_t next_read_location = 0;
 	uint64_t prev_indices = 0;
+	*signal = FALSE;
 
 	if (buffer_len <= 0)
 	    return (EINVAL);
@@ -443,6 +494,7 @@ hv_ring_buffer_read(
 
 	mtx_unlock_spin(&in_ring_info->ring_lock);
 
+	*signal = hv_need_to_signal_on_read(bytes_avail_to_write, in_ring_info);
 	return (0);
 }
 

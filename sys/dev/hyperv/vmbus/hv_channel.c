@@ -817,6 +817,7 @@ hv_vmbus_channel_recv_packet(
 	uint32_t		user_len;
 	uint32_t		packet_len;
 	hv_vm_packet_descriptor	desc;
+	boolean_t 		signal;
 
 	*buffer_actual_len = 0;
 	*request_id = 0;
@@ -838,9 +839,10 @@ hv_vmbus_channel_recv_packet(
 
 	/* Copy over the packet to the user buffer */
 	ret = hv_ring_buffer_read(&channel->inbound, Buffer, user_len,
-		(desc.data_offset8 << 3));
-
-	return (0);
+		(desc.data_offset8 << 3), &signal);
+	if (ret == 0 && signal)
+		vmbus_channel_set_event(channel);
+	return (ret);
 }
 
 /**
@@ -858,6 +860,7 @@ hv_vmbus_channel_recv_packet_raw(
 	uint32_t	packetLen;
 	uint32_t	userLen;
 	hv_vm_packet_descriptor	desc;
+	boolean_t               signal;
 
 	*buffer_actual_len = 0;
 	*request_id = 0;
@@ -880,9 +883,11 @@ hv_vmbus_channel_recv_packet_raw(
 	*request_id = desc.transaction_id;
 
 	/* Copy over the entire packet to the user buffer */
-	ret = hv_ring_buffer_read(&channel->inbound, buffer, packetLen, 0);
+	ret = hv_ring_buffer_read(&channel->inbound, buffer, packetLen, 0, &signal);
+	if (ret == 0 && signal)
+		vmbus_channel_set_event(channel);
 
-	return (0);
+	return (ret);
 }
 
 

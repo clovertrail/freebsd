@@ -663,7 +663,8 @@ int			hv_ring_buffer_read(
 				hv_vmbus_ring_buffer_info	*ring_info,
 				void				*buffer,
 				uint32_t			buffer_len,
-				uint32_t			offset);
+				uint32_t			offset,
+				boolean_t			*signal);
 
 uint32_t		hv_vmbus_get_ring_buffer_interrupt_mask(
 				hv_vmbus_ring_buffer_info	*ring_info);
