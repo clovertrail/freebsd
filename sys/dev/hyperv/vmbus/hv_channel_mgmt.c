@@ -142,7 +142,10 @@ hv_vmbus_allocate_channel(void)
 
 	mtx_init(&channel->sc_lock, "vmbus multi channel", NULL, MTX_DEF);
 	TAILQ_INIT(&channel->sc_list_anchor);
-
+	channel->callback_buf = malloc(NETVSC_PACKET_SIZE,
+					M_DEVBUF,
+					M_WAITOK | M_ZERO);
+				
 	return (channel);
 }
 
@@ -153,6 +156,7 @@ void
 hv_vmbus_free_vmbus_channel(hv_vmbus_channel* channel)
 {
 	mtx_destroy(&channel->sc_lock);
+	free(channel->callback_buf, M_DEVBUF);
 	free(channel, M_DEVBUF);
 }
 

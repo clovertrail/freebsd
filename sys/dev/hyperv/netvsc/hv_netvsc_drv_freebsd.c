@@ -117,9 +117,6 @@ __FBSDID("$FreeBSD$");
 #include "hv_rndis.h"
 #include "hv_rndis_filter.h"
 
-#define hv_chan_rxr	hv_chan_priv1
-#define hv_chan_txr	hv_chan_priv2
-
 /* Short for Hyper-V network interface */
 #define NETVSC_DEVNAME    "hn"
 

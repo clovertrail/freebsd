@@ -120,6 +120,11 @@ typedef uint8_t	hv_bool_uint8_t;
 		((HV_ALIGN_UP(addr+len, PAGE_SIZE) -			\
 		    HV_ALIGN_DOWN(addr, PAGE_SIZE)) >> PAGE_SHIFT )
 
+#define NETVSC_PACKET_SIZE			PAGE_SIZE
+
+#define hv_chan_rxr	hv_chan_priv1
+#define hv_chan_txr	hv_chan_priv2
+
 typedef struct hv_guid {
 	 unsigned char data[16];
 } __packed hv_guid;
@@ -823,6 +828,7 @@ typedef struct hv_vmbus_channel {
 	 */
 	struct hv_vmbus_channel		*primary_channel;
 
+	uint8_t				*callback_buf;
 	/*
 	 * Driver private data
 	 */
