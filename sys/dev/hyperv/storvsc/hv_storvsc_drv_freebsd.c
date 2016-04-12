@@ -71,6 +71,8 @@ __FBSDID("$FreeBSD$");
 #include <cam/scsi/scsi_all.h>
 #include <cam/scsi/scsi_message.h>
 
+#include <sys/sysctl.h>
+
 #include <dev/hyperv/include/hyperv.h>
 #include "hv_vstorage.h"
 
@@ -259,6 +261,14 @@ static device_method_t storvsc_methods[] = {
 static driver_t storvsc_driver = {
 	"storvsc", storvsc_methods, sizeof(struct storvsc_softc),
 };
+
+static int act_xpt_path_inq = 0;
+static int act_xpt_get_tran_set = 0;
+static int act_xpt_set_tran_set = 0;
+static int act_scsi_io_immed_notify = 0;
+static int act_xpt_reset_bus_dev = 0;
+static int act_xpt_calc_geometry = 0;
+static int act_default = 0;
 
 static devclass_t storvsc_devclass;
 DRIVER_MODULE(storvsc, vmbus, storvsc_driver, storvsc_devclass, 0, 0);
@@ -947,6 +957,33 @@ storvsc_probe(device_t dev)
 	return (ret);
 }
 
+static void
+add_action_sysctl(device_t dev)
+{
+	struct sysctl_ctx_list *ctx;
+	ctx = device_get_sysctl_ctx(dev);
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT Path INQ", CTLFLAG_RD, &act_xpt_path_inq,
+		0, "# of XPT Path INQURIY"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT Get Tran Setting", CTLFLAG_RD, &act_xpt_get_tran_set,
+		0, "# of XPT Get Tran Setting"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT Set Tran Setting", CTLFLAG_RD, &act_xpt_set_tran_set,
+		0, "# of XPT Set Tran Setting"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT SCSI IO/Immed Notify", CTLFLAG_RD, &act_scsi_io_immed_notify,
+		0, "# of XPT SCSI IO/Immed Notify"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT Reset BUS/Dev", CTLFLAG_RD, &act_xpt_reset_bus_dev,
+		0, "# of XPT Reset BUS/Dev"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT Calc Geometry", CTLFLAG_RD, &act_xpt_calc_geometry,
+		0, "# of ACT Calc Geometry"); 
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "ACT default", CTLFLAG_RD, &act_default,
+		0, "# of ACT default");	
+}
 /**
  * @brief StorVSC attach function
  *
@@ -974,7 +1011,7 @@ storvsc_attach(device_t dev)
 	 * We need to serialize storvsc attach calls.
 	 */
 	root_mount_token = root_mount_hold("storvsc");
-
+	add_action_sysctl(dev);
 	sc = device_get_softc(dev);
 	if (sc == NULL) {
 		ret = ENOMEM;
