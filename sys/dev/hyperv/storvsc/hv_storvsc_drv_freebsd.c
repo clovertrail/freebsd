@@ -269,6 +269,7 @@ static int act_scsi_io_immed_notify = 0;
 static int act_xpt_reset_bus_dev = 0;
 static int act_xpt_calc_geometry = 0;
 static int act_default = 0;
+static int callout_timeout_cnt = 0;
 
 static devclass_t storvsc_devclass;
 DRIVER_MODULE(storvsc, vmbus, storvsc_driver, storvsc_devclass, 0, 0);
@@ -983,6 +984,9 @@ add_action_sysctl(device_t dev)
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
 		OID_AUTO, "ACT default", CTLFLAG_RD, &act_default,
 		0, "# of ACT default");	
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		OID_AUTO, "DA cmd timeout cnt", CTLFLAG_RD, &callout_timeout_cnt,
+		0, "counter for DA cmd timeout");	
 }
 /**
  * @brief StorVSC attach function
@@ -1503,6 +1507,7 @@ storvsc_action(struct cam_sim *sim, union ccb *ccb)
 		}
 
 		if (ccb->ccb_h.timeout != CAM_TIME_INFINITY) {
+			callout_timeout_cnt++;
 			callout_init(&reqp->callout, 1);
 			callout_reset_sbt(&reqp->callout,
 			    SBT_1MS * ccb->ccb_h.timeout, 0,
