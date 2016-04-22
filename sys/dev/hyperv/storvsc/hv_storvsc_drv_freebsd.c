@@ -1817,6 +1817,16 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 	uint32_t pfn;
 	uint64_t not_aligned_seg_bits = 0;
 	
+	const struct scsi_generic *cmd;
+
+	cmd = (const struct scsi_generic *)
+	    ((ccb->ccb_h.flags & CAM_CDB_POINTER) ?
+	     csio->cdb_io.cdb_ptr : csio->cdb_io.cdb_bytes);
+	if (cmd->opcode == UNMAP) {
+	    if (bootverbose) {
+		printf("Request TRIM(UNMAP for SCSI)\n");
+	    }
+	}
 	/* refer to struct vmscsi_req for meanings of these two fields */
 	reqp->vstor_packet.u.vm_srb.port =
 		cam_sim_unit(xpt_path_sim(ccb->ccb_h.path));
@@ -2127,11 +2137,9 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 	 * Note that we need to make sure reqp is not freed when timer
 	 * handler is using or will use it.
 	 */
-	#if 0
 	if (ccb->ccb_h.timeout != CAM_TIME_INFINITY) {
 		callout_drain(&reqp->callout);
 	}
-	#endif
 	ccb->ccb_h.status &= ~CAM_SIM_QUEUED;
 	ccb->ccb_h.status &= ~CAM_STATUS_MASK;
 	if (vm_srb->scsi_status == SCSI_STATUS_OK) {
@@ -2176,6 +2184,12 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 			ccb->ccb_h.status |= CAM_REQ_CMP;
 		    }
 		} else {
+			if (cmd->opcode == UNMAP) {
+			    if (bootverbose) {
+				xpt_print(ccb->ccb_h.path,
+				   "TRIM (UNMAP for SCSI) is done\n");
+			    }
+			}
 			ccb->ccb_h.status |= CAM_REQ_CMP;
 		}
 	} else {
