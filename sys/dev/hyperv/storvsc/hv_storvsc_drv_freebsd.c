@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/condvar.h>
 #include <sys/time.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
@@ -119,6 +120,7 @@ struct hv_storvsc_request {
 	void *sense_data;
 	uint8_t sense_info_len;
 	uint8_t retries;
+	struct timeval time_before_sending; /* the time before posting req to host */
 	union ccb *ccb;
 	struct storvsc_softc *softc;
 	struct callout callout;
@@ -128,6 +130,7 @@ struct hv_storvsc_request {
 	uint64_t not_aligned_seg_bits;
 };
 
+#define REQUEST_COST_TABLE_SIZE		8
 struct storvsc_softc {
 	struct hv_device		*hs_dev;
 	LIST_HEAD(, hv_storvsc_request)	hs_free_list;
@@ -143,6 +146,9 @@ struct storvsc_softc {
 	struct sema 			hs_drain_sema;	
 	struct hv_storvsc_request	hs_init_req;
 	struct hv_storvsc_request	hs_reset_req;
+	/* statistic for request cost */
+	uint32_t			request_cost_table[REQUEST_COST_TABLE_SIZE];
+	uint32_t			data_len;
 };
 
 
@@ -203,6 +209,7 @@ static struct storvsc_driver_props g_drv_props_table[] = {
 	 STORVSC_RINGBUFFER_SIZE}
 };
 
+static const int request_cost_base = 64;
 /*
  * Sense buffer size changed in win8; have a run-time
  * variable to track the size we should use.
@@ -716,6 +723,12 @@ hv_storvsc_io_request(struct hv_device *device,
 	outgoing_channel = vmbus_select_outgoing_channel(device->channel);
 
 	mtx_unlock(&request->softc->hs_lock);
+	/* 
+	 * statistic for the duration taken by
+	 * one request to host and got the corresponding
+	 * response from host
+	 */
+	getmicrouptime(&(request->time_before_sending));
 	if (request->data_buf.length) {
 		ret = hv_vmbus_channel_send_packet_multipagebuffer(
 				outgoing_channel,
@@ -744,7 +757,23 @@ hv_storvsc_io_request(struct hv_device *device,
 	return (ret);
 }
 
+static void
+hv_record_request_cost(struct hv_storvsc_request *request)
+{
+	struct timeval now;
+	int cost_table_idx;
+	int cost;
+	getmicrouptime(&now);
+	timevalsub(&now, &(request->time_before_sending));
+	cost = now.tv_sec * 1000000 + now.tv_usec;
+	cost_table_idx = fls(cost >> (fls(request_cost_base) - 1)) - 1;
+	cost_table_idx = cost_table_idx < REQUEST_COST_TABLE_SIZE ?
+			 (cost_table_idx >= 0 ? cost_table_idx : 0):
+			 (REQUEST_COST_TABLE_SIZE - 1);
+	request->softc->request_cost_table[cost_table_idx]++;
 
+	request->softc->data_len = request->data_buf.length;
+}
 /**
  * Process IO_COMPLETION_OPERATION and ready
  * the result to be completed for upper layer
@@ -756,6 +785,8 @@ hv_storvsc_on_iocompletion(struct storvsc_softc *sc,
 			   struct hv_storvsc_request *request)
 {
 	struct vmscsi_req *vm_srb;
+
+	hv_record_request_cost(request);
 
 	vm_srb = &vstor_packet->u.vm_srb;
 
@@ -941,6 +972,51 @@ storvsc_probe(device_t dev)
 	return (ret);
 }
 
+static void
+hv_storvsc_stat(device_t dev)
+{
+	struct sysctl_ctx_list *ctx;
+	struct sysctl_oid *dev_sysctl;
+	char name[16];
+	char desc[100];
+	int i;
+	struct storvsc_softc *sc = device_get_softc(dev);
+	ctx = device_get_sysctl_ctx(dev);
+
+	/* This creates dev.DEVNAME.DEVUNIT.trans_qps tree */
+	dev_sysctl = SYSCTL_ADD_NODE(ctx,
+		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+		    OID_AUTO, "trans_cost", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "");
+	snprintf(name, sizeof(name), "%d", request_cost_base);
+	snprintf(desc, sizeof(desc), "transaction cost < %d", request_cost_base);
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
+			OID_AUTO, name, CTLFLAG_RD,
+			&(sc->request_cost_table[0]), 0,
+			desc);
+	for (i = 1; i < REQUEST_COST_TABLE_SIZE - 1; i++) {
+		snprintf(name, sizeof(name), "%d-%d", request_cost_base << (i - 1),
+			(request_cost_base << i) - 1);
+		snprintf(desc, sizeof(desc), "transaction cost [%d,%d)",
+			request_cost_base << (i - 1),
+			(request_cost_base << i) - 1);
+		SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
+			OID_AUTO, name, CTLFLAG_RD,
+			&(sc->request_cost_table[i]), 0, desc);
+	}
+	snprintf(name, sizeof(name), "%d",
+		request_cost_base << (REQUEST_COST_TABLE_SIZE - 1));
+	snprintf(desc, sizeof(desc), "transaction cost >= %d",
+		request_cost_base << (REQUEST_COST_TABLE_SIZE - 1));
+	
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
+			OID_AUTO, name, CTLFLAG_RD,
+			&(sc->request_cost_table[REQUEST_COST_TABLE_SIZE-1]), 0, desc);
+	/* data length in each request */
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
+			OID_AUTO, "req_data_len", CTLFLAG_RD,
+			&(sc->data_len), 0,
+			"data length for each request");
+}
 /**
  * @brief StorVSC attach function
  *
@@ -1086,6 +1162,8 @@ storvsc_attach(device_t dev)
 	}
 
 	mtx_unlock(&sc->hs_lock);
+
+	hv_storvsc_stat(dev);
 
 	root_mount_rel(root_mount_token);
 	return (0);
