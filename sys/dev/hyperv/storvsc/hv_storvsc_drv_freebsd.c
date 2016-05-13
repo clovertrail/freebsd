@@ -130,7 +130,7 @@ struct hv_storvsc_request {
 	uint64_t not_aligned_seg_bits;
 };
 
-#define REQUEST_COST_TABLE_SIZE		8
+#define REQUEST_COST_TABLE_SIZE		14
 struct storvsc_softc {
 	struct hv_device		*hs_dev;
 	LIST_HEAD(, hv_storvsc_request)	hs_free_list;
@@ -209,7 +209,7 @@ static struct storvsc_driver_props g_drv_props_table[] = {
 	 STORVSC_RINGBUFFER_SIZE}
 };
 
-static const int request_cost_base = 64;
+static const int request_cost_base = 1;
 /*
  * Sense buffer size changed in win8; have a run-time
  * variable to track the size we should use.
@@ -988,32 +988,32 @@ hv_storvsc_stat(device_t dev)
 		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
 		    OID_AUTO, "trans_cost", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "");
 	snprintf(name, sizeof(name), "%d", request_cost_base);
-	snprintf(desc, sizeof(desc), "transaction cost < %d", request_cost_base);
+	snprintf(desc, sizeof(desc), "transaction cost < %d microseconds", request_cost_base);
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
-			OID_AUTO, name, CTLFLAG_RD,
+			OID_AUTO, name, CTLFLAG_RW,
 			&(sc->request_cost_table[0]), 0,
 			desc);
 	for (i = 1; i < REQUEST_COST_TABLE_SIZE - 1; i++) {
 		snprintf(name, sizeof(name), "%d-%d", request_cost_base << (i - 1),
 			(request_cost_base << i) - 1);
-		snprintf(desc, sizeof(desc), "transaction cost [%d,%d)",
+		snprintf(desc, sizeof(desc), "transaction cost [%d,%d] microseconds",
 			request_cost_base << (i - 1),
 			(request_cost_base << i) - 1);
 		SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
-			OID_AUTO, name, CTLFLAG_RD,
+			OID_AUTO, name, CTLFLAG_RW,
 			&(sc->request_cost_table[i]), 0, desc);
 	}
 	snprintf(name, sizeof(name), "%d",
 		request_cost_base << (REQUEST_COST_TABLE_SIZE - 1));
-	snprintf(desc, sizeof(desc), "transaction cost >= %d",
+	snprintf(desc, sizeof(desc), "transaction cost >= %d microseconds",
 		request_cost_base << (REQUEST_COST_TABLE_SIZE - 1));
 	
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
-			OID_AUTO, name, CTLFLAG_RD,
+			OID_AUTO, name, CTLFLAG_RW,
 			&(sc->request_cost_table[REQUEST_COST_TABLE_SIZE-1]), 0, desc);
 	/* data length in each request */
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(dev_sysctl),
-			OID_AUTO, "req_data_len", CTLFLAG_RD,
+			OID_AUTO, "req_data_len", CTLFLAG_RW,
 			&(sc->data_len), 0,
 			"data length for each request");
 }
