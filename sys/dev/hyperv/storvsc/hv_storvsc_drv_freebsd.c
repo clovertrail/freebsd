@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/condvar.h>
 #include <sys/time.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
@@ -112,20 +113,35 @@ enum storvsc_request_type {
 	UNKNOWN_TYPE
 };
 
+#define STORVSC_DATA_SEGCNT_MAX		(32)
+SYSCTL_NODE(_hw, OID_AUTO, storvsc, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+    "Hyper-V storage interface");
+
+static u_int hv_storvsc_use_pim_unmapped = 1;
+SYSCTL_INT(_hw_storvsc, OID_AUTO, use_pim_unmapped, CTLFLAG_RDTUN,
+	&hv_storvsc_use_pim_unmapped, 0, "Optimize storvsc by using unmapped memory");
+
+struct hv_storvsc_sysctl {
+	u_long		data_bio_cnt;
+	u_long		data_vaddr_cnt;
+	u_long		data_sg_cnt;
+};
+
 struct hv_storvsc_request {
-	LIST_ENTRY(hv_storvsc_request) link;
-	struct vstor_packet	vstor_packet;
-	hv_vmbus_multipage_buffer data_buf;
-	void *sense_data;
-	uint8_t sense_info_len;
-	uint8_t retries;
-	union ccb *ccb;
-	struct storvsc_softc *softc;
-	struct callout callout;
-	struct sema synch_sema; /*Synchronize the request/response if needed */
-	struct sglist *bounce_sgl;
-	unsigned int bounce_sgl_count;
-	uint64_t not_aligned_seg_bits;
+	LIST_ENTRY(hv_storvsc_request) 	link;
+	struct vstor_packet		vstor_packet;
+	hv_vmbus_multipage_buffer 	data_buf;
+	void 				*sense_data;
+	uint8_t 			sense_info_len;
+	uint8_t 			retries;
+	union ccb 			*ccb;
+	struct storvsc_softc 		*softc;
+	struct callout 			callout;
+	struct sema 			synch_sema; /*Synchronize the request/response if needed */
+	struct sglist 			*bounce_sgl;
+	unsigned int 			bounce_sgl_count;
+	uint64_t 			not_aligned_seg_bits;
+	bus_dmamap_t    		data_dmap;
 };
 
 struct storvsc_softc {
@@ -144,6 +160,8 @@ struct storvsc_softc {
 	struct sema 			hs_drain_sema;	
 	struct hv_storvsc_request	hs_init_req;
 	struct hv_storvsc_request	hs_reset_req;
+	bus_dma_tag_t                   storvsc_req_dtag;
+	struct hv_storvsc_sysctl        sysctl_data;
 };
 
 
@@ -952,6 +970,74 @@ storvsc_probe(device_t dev)
 	return (ret);
 }
 
+static int storvsc_init_requests(device_t dev)
+{
+	struct storvsc_softc *sc;
+	struct hv_storvsc_request *reqp;
+	int error, i;
+
+	sc = device_get_softc(dev);
+	LIST_INIT(&sc->hs_free_list);
+	error = bus_dma_tag_create(bus_get_dma_tag(dev), /* parent */
+		1,		            /* alignment */
+		PAGE_SIZE,		    /* boundary */
+		BUS_SPACE_MAXADDR,          /* lowaddr */
+		BUS_SPACE_MAXADDR,          /* highaddr */
+		NULL, NULL,                 /* filter, filterarg */
+		STORVSC_DATA_SEGCNT_MAX*PAGE_SIZE, /* maxsize */
+		STORVSC_DATA_SEGCNT_MAX,    /* nsegments */
+		PAGE_SIZE,                  /* maxsegsize */
+		0,                          /* flags */
+		NULL,                       /* lockfunc */
+		NULL,                       /* lockfuncarg */
+		&sc->storvsc_req_dtag);
+	if (error) {
+		device_printf(sc->hs_dev->device, "failed to create storvsc dma tag\n");
+		return (error);
+	}
+
+	for (i = 0; i < sc->hs_drv_props->drv_max_ios_per_target; ++i) {
+		reqp = malloc(sizeof(struct hv_storvsc_request),
+				 M_DEVBUF, M_WAITOK|M_ZERO);
+		reqp->softc = sc;
+		error = bus_dmamap_create(sc->storvsc_req_dtag, 0,
+				&reqp->data_dmap);
+		if (error) {
+			device_printf(sc->hs_dev->device, "failed to allocate storvsc data dmamap\n");
+			goto cleanup;
+		}
+		LIST_INSERT_HEAD(&sc->hs_free_list, reqp, link);
+	}
+	return (0);
+
+cleanup:
+	while (!LIST_EMPTY(&sc->hs_free_list)) {
+		reqp = LIST_FIRST(&sc->hs_free_list);
+		LIST_REMOVE(reqp, link);
+		free(reqp, M_DEVBUF);
+	}
+	return (0);
+}
+
+static void
+storvsc_sysctl(device_t dev)
+{
+	struct sysctl_oid_list *child;
+	struct sysctl_ctx_list *ctx;
+	struct storvsc_softc *sc;
+
+	sc = device_get_softc(dev);
+	ctx = device_get_sysctl_ctx(dev);
+	child = SYSCTL_CHILDREN(device_get_sysctl_tree(dev));
+
+	SYSCTL_ADD_ULONG(ctx, child, OID_AUTO, "data_bio_cnt", CTLFLAG_RW,
+		&sc->sysctl_data.data_bio_cnt, "# of bio data block");
+	SYSCTL_ADD_ULONG(ctx, child, OID_AUTO, "data_vaddr_cnt", CTLFLAG_RW,
+		&sc->sysctl_data.data_vaddr_cnt, "# of vaddr data block");
+	SYSCTL_ADD_ULONG(ctx, child, OID_AUTO, "data_sg_cnt", CTLFLAG_RW,
+		&sc->sysctl_data.data_sg_cnt, "# of sg data block");
+}
+
 /**
  * @brief StorVSC attach function
  *
@@ -1003,16 +1089,12 @@ storvsc_attach(device_t dev)
 	sc->hs_dev	= hv_dev;
 	device_set_desc(dev, g_drv_props_table[stor_type].drv_desc);
 
-	LIST_INIT(&sc->hs_free_list);
 	mtx_init(&sc->hs_lock, "hvslck", NULL, MTX_DEF);
 
-	for (i = 0; i < sc->hs_drv_props->drv_max_ios_per_target; ++i) {
-		reqp = malloc(sizeof(struct hv_storvsc_request),
-				 M_DEVBUF, M_WAITOK|M_ZERO);
-		reqp->softc = sc;
-
-		LIST_INSERT_HEAD(&sc->hs_free_list, reqp, link);
-	}
+	if (storvsc_init_requests(dev)) {
+		ret = ENODEV;
+		goto cleanup;
+ 	}
 
 	/* create sg-list page pool */
 	if (FALSE == g_hv_sgl_page_pool.is_init) {
@@ -1103,6 +1185,8 @@ storvsc_attach(device_t dev)
 		ret = ENXIO;
 		goto cleanup;
 	}
+
+	storvsc_sysctl(dev);
 
 	mtx_unlock(&sc->hs_lock);
 
@@ -1370,6 +1454,9 @@ storvsc_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->hba_inquiry = PI_TAG_ABLE|PI_SDTR_ABLE;
 		cpi->target_sprt = 0;
 		cpi->hba_misc = PIM_NOBUSRESET;
+		if (hv_storvsc_use_pim_unmapped) {
+			cpi->hba_misc |= PIM_UNMAPPED;
+		}
 		cpi->hba_eng_cnt = 0;
 		cpi->max_target = STORVSC_MAX_TARGETS;
 		cpi->max_lun = sc->hs_drv_props->drv_max_luns_per_target;
@@ -1717,6 +1804,31 @@ storvsc_check_bounce_buffer_sgl(bus_dma_segment_t *sgl,
 }
 
 /**
++ * Copy bus_dma segments to multiple page buffer, which requires
++ * the pages are compact composed except for the 1st and last pages.
++ */
+static void
+storvsc_xferbuf_prepare(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
+{
+	struct hv_storvsc_request *reqp = arg;
+	union ccb *ccb = reqp->ccb;
+	struct ccb_scsiio *csio = &ccb->csio;
+	int i;
+
+	reqp->data_buf.offset = segs[0].ds_addr & PAGE_MASK;
+	reqp->data_buf.length = csio->dxfer_len;
+
+	for (i = 0; i < nsegs; i++) {
+		reqp->data_buf.pfn_array[i] = atop(segs[i].ds_addr);
+		if (i != 0 && i != nsegs - 1) {
+		     KASSERT((segs[i].ds_addr & PAGE_MASK) == 0 && 
+				segs[i].ds_len == PAGE_SIZE,
+			   ("bus_dma page segment is not a full page"));
+		}
+	}
+}
+
+/**
  * @brief Fill in a request structure based on a CAM control block
  *
  * Fills in a request structure based on the contents of a CAM control
@@ -1781,6 +1893,13 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 	reqp->data_buf.length = csio->dxfer_len;
 
 	switch (ccb->ccb_h.flags & CAM_DATA_MASK) {
+	case CAM_DATA_BIO:
+	{
+		bus_dmamap_load_ccb(reqp->softc->storvsc_req_dtag,
+			reqp->data_dmap, ccb, storvsc_xferbuf_prepare, reqp, 0);
+		reqp->softc->sysctl_data.data_bio_cnt++;
+		break;
+	}
 	case CAM_DATA_VADDR:
 	{
 		bytes_to_copy = csio->dxfer_len;
@@ -1801,6 +1920,7 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 			bytes_to_copy -= bytes;
 			pfn_num++;
 		}
+		reqp->softc->sysctl_data.data_vaddr_cnt++;
 		break;
 	}
 
@@ -1913,6 +2033,7 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 			
 			reqp->bounce_sgl_count = 0;
 		}
+		reqp->softc->sysctl_data.data_sg_cnt++;
 		break;
 	}
 	default:
