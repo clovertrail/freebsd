@@ -118,6 +118,7 @@ SYSCTL_NODE(_hw, OID_AUTO, storvsc, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
     "Hyper-V storage interface");
 
 static u_int hv_storvsc_use_pim_unmapped = 1;
+TUNABLE_INT("hw.storvsc.use_pim_unmapped", &hv_storvsc_use_pim_unmapped);
 SYSCTL_INT(_hw_storvsc, OID_AUTO, use_pim_unmapped, CTLFLAG_RDTUN,
 	&hv_storvsc_use_pim_unmapped, 0, "Optimize storvsc by using unmapped memory");
 
