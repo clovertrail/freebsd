@@ -1228,6 +1228,7 @@ cleanup:
 	while (!LIST_EMPTY(&sc->hs_free_list)) {
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
+		bus_dmamap_destroy(sc->storvsc_req_dtag, reqp->data_dmap);
 		free(reqp, M_DEVBUF);
 	}
 
@@ -1290,7 +1291,7 @@ storvsc_detach(device_t dev)
 	while (!LIST_EMPTY(&sc->hs_free_list)) {
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
-
+		bus_dmamap_destroy(sc->storvsc_req_dtag, reqp->data_dmap);
 		free(reqp, M_DEVBUF);
 	}
 	mtx_unlock(&sc->hs_lock);
@@ -1577,8 +1578,11 @@ storvsc_action(struct cam_sim *sim, union ccb *ccb)
 
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
-
+		// backup the bus_dmamap value before reset request
+		bus_dmamap_t dmap_back = reqp->data_dmap;
 		bzero(reqp, sizeof(struct hv_storvsc_request));
+		reqp->data_dmap = dmap_back;
+
 		reqp->softc = sc;
 		
 		ccb->ccb_h.status |= CAM_SIM_QUEUED;
