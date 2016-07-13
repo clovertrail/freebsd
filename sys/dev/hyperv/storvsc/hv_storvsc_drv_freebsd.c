@@ -130,37 +130,37 @@ struct hv_storvsc_sysctl {
 
 struct hv_storvsc_request {
 	LIST_ENTRY(hv_storvsc_request) 	link;
-	struct vstor_packet		vstor_packet;
-	hv_vmbus_multipage_buffer 	data_buf;
-	void 				*sense_data;
-	uint8_t 			sense_info_len;
-	uint8_t 			retries;
-	union ccb 			*ccb;
-	struct storvsc_softc 		*softc;
-	struct callout 			callout;
-	struct sema 			synch_sema; /*Synchronize the request/response if needed */
-	struct sglist 			*bounce_sgl;
-	unsigned int 			bounce_sgl_count;
-	uint64_t 			not_aligned_seg_bits;
-	bus_dmamap_t    		data_dmap;
+	struct vstor_packet             vstor_packet;
+	hv_vmbus_multipage_buffer       data_buf;
+	void                            *sense_data;
+	uint8_t                         sense_info_len;
+	uint8_t                         retries;
+	union ccb                       *ccb;
+	struct storvsc_softc            *softc;
+	struct callout                  callout;
+	struct sema                     synch_sema; /*Synchronize the request/response if needed */
+	struct sglist                   *bounce_sgl;
+	unsigned int                    bounce_sgl_count;
+	uint64_t                        not_aligned_seg_bits;
+	bus_dmamap_t                    data_dmap;
 };
 
 struct storvsc_softc {
-	struct hv_device		*hs_dev;
+	struct hv_device                *hs_dev;
 	LIST_HEAD(, hv_storvsc_request)	hs_free_list;
-	struct mtx			hs_lock;
-	struct storvsc_driver_props	*hs_drv_props;
-	int 				hs_unit;
-	uint32_t			hs_frozen;
-	struct cam_sim			*hs_sim;
-	struct cam_path 		*hs_path;
-	uint32_t			hs_num_out_reqs;
-	boolean_t			hs_destroy;
-	boolean_t			hs_drain_notify;
-	boolean_t			hs_open_multi_channel;
-	struct sema 			hs_drain_sema;	
-	struct hv_storvsc_request	hs_init_req;
-	struct hv_storvsc_request	hs_reset_req;
+	struct mtx                      hs_lock;
+	struct storvsc_driver_props     *hs_drv_props;
+	int                             hs_unit;
+	uint32_t                        hs_frozen;
+	struct cam_sim                  *hs_sim;
+	struct cam_path                 *hs_path;
+	uint32_t                        hs_num_out_reqs;
+	boolean_t                       hs_destroy;
+	boolean_t                       hs_drain_notify;
+	boolean_t                       hs_open_multi_channel;
+	struct sema                     hs_drain_sema;
+	struct hv_storvsc_request       hs_init_req;
+	struct hv_storvsc_request       hs_reset_req;
 	bus_dma_tag_t                   storvsc_req_dtag;
 	struct hv_storvsc_sysctl        sysctl_data;
 };
@@ -979,18 +979,19 @@ static int storvsc_init_requests(device_t dev)
 
 	sc = device_get_softc(dev);
 	LIST_INIT(&sc->hs_free_list);
-	error = bus_dma_tag_create(bus_get_dma_tag(dev), /* parent */
-		1,		            /* alignment */
-		PAGE_SIZE,		    /* boundary */
-		BUS_SPACE_MAXADDR,          /* lowaddr */
-		BUS_SPACE_MAXADDR,          /* highaddr */
-		NULL, NULL,                 /* filter, filterarg */
+	error = bus_dma_tag_create(
+		bus_get_dma_tag(dev),              /* parent */
+		1,		                   /* alignment */
+		PAGE_SIZE,		           /* boundary */
+		BUS_SPACE_MAXADDR,                 /* lowaddr */
+		BUS_SPACE_MAXADDR,                 /* highaddr */
+		NULL, NULL,                        /* filter, filterarg */
 		STORVSC_DATA_SEGCNT_MAX*PAGE_SIZE, /* maxsize */
-		STORVSC_DATA_SEGCNT_MAX,    /* nsegments */
-		PAGE_SIZE,                  /* maxsegsize */
-		0,                          /* flags */
-		NULL,                       /* lockfunc */
-		NULL,                       /* lockfuncarg */
+		STORVSC_DATA_SEGCNT_MAX,           /* nsegments */
+		PAGE_SIZE,                         /* maxsegsize */
+		0,                                 /* flags */
+		NULL,                              /* lockfunc */
+		NULL,                              /* lockfuncarg */
 		&sc->storvsc_req_dtag);
 	if (error) {
 		device_printf(sc->hs_dev->device, "failed to create storvsc dma tag\n");
@@ -1015,6 +1016,7 @@ cleanup:
 	while (!LIST_EMPTY(&sc->hs_free_list)) {
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
+		bus_dmamap_destroy(sc->storvsc_req_dtag, reqp->data_dmap);
 		free(reqp, M_DEVBUF);
 	}
 	return (0);
@@ -1200,6 +1202,7 @@ cleanup:
 	while (!LIST_EMPTY(&sc->hs_free_list)) {
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
+		bus_dmamap_destroy(sc->storvsc_req_dtag, reqp->data_dmap);
 		free(reqp, M_DEVBUF);
 	}
 
@@ -1264,7 +1267,7 @@ storvsc_detach(device_t dev)
 	while (!LIST_EMPTY(&sc->hs_free_list)) {
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
-
+		bus_dmamap_destroy(sc->storvsc_req_dtag, reqp->data_dmap);
 		free(reqp, M_DEVBUF);
 	}
 	mtx_unlock(&sc->hs_lock);
@@ -1549,8 +1552,11 @@ storvsc_action(struct cam_sim *sim, union ccb *ccb)
 
 		reqp = LIST_FIRST(&sc->hs_free_list);
 		LIST_REMOVE(reqp, link);
-
+		// backup the bus_dmamap value before reset request
+		bus_dmamap_t dmap = reqp->data_dmap;
 		bzero(reqp, sizeof(struct hv_storvsc_request));
+		reqp->data_dmap = dmap;
+
 		reqp->softc = sc;
 		
 		ccb->ccb_h.status |= CAM_SIM_QUEUED;
@@ -1844,11 +1850,9 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 {
 	struct ccb_scsiio *csio = &ccb->csio;
 	uint64_t phys_addr;
-	uint32_t bytes_to_copy = 0;
-	uint32_t pfn_num = 0;
 	uint32_t pfn;
 	uint64_t not_aligned_seg_bits = 0;
-	
+	int error;
 	/* refer to struct vmscsi_req for meanings of these two fields */
 	reqp->vstor_packet.u.vm_srb.port =
 		cam_sim_unit(xpt_path_sim(ccb->ccb_h.path));
@@ -1895,33 +1899,20 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 
 	switch (ccb->ccb_h.flags & CAM_DATA_MASK) {
 	case CAM_DATA_BIO:
-	{
-		bus_dmamap_load_ccb(reqp->softc->storvsc_req_dtag,
-			reqp->data_dmap, ccb, storvsc_xferbuf_prepare, reqp, 0);
-		reqp->softc->sysctl_data.data_bio_cnt++;
-		break;
-	}
 	case CAM_DATA_VADDR:
 	{
-		bytes_to_copy = csio->dxfer_len;
-		phys_addr = vtophys(csio->data_ptr);
-		reqp->data_buf.offset = phys_addr & PAGE_MASK;
-		
-		while (bytes_to_copy != 0) {
-			int bytes, page_offset;
-			phys_addr =
-			    vtophys(&csio->data_ptr[reqp->data_buf.length -
-			    bytes_to_copy]);
-			pfn = phys_addr >> PAGE_SHIFT;
-			reqp->data_buf.pfn_array[pfn_num] = pfn;
-			page_offset = phys_addr & PAGE_MASK;
-
-			bytes = min(PAGE_SIZE - page_offset, bytes_to_copy);
-
-			bytes_to_copy -= bytes;
-			pfn_num++;
+		error = bus_dmamap_load_ccb(reqp->softc->storvsc_req_dtag,
+			reqp->data_dmap, ccb, storvsc_xferbuf_prepare,
+			reqp, BUS_DMA_NOWAIT);
+		if (error) {
+			printf("Storvsc: failed in bus_dmamap_load_ccb: %d\n", error);
+			return (error);
 		}
-		reqp->softc->sysctl_data.data_vaddr_cnt++;
+		if ((ccb->ccb_h.flags & CAM_DATA_MASK) == CAM_DATA_BIO) {
+			reqp->softc->sysctl_data.data_bio_cnt++;
+		} else {
+			reqp->softc->sysctl_data.data_vaddr_cnt++;
+		}
 		break;
 	}
 
