@@ -2063,9 +2063,10 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 		cmd = (const struct scsi_generic *)
 		    ((ccb->ccb_h.flags & CAM_CDB_POINTER) ?
 		     csio->cdb_io.cdb_ptr : csio->cdb_io.cdb_bytes);
-		if (cmd->opcode == INQUIRY &&
-		    is_inquiry_valid(
-		    (const struct scsi_inquiry_data *)csio->data_ptr) == 0) {
+		if (cmd->opcode == INQUIRY) {
+		    const struct scsi_inquiry_data * inq_data =
+			(const struct scsi_inquiry_data *)csio->data_ptr;
+		    if (is_inquiry_valid(inq_data) == 0) {
 			ccb->ccb_h.status |= CAM_DEV_NOT_THERE;
 			if (bootverbose) {
 				mtx_lock(&sc->hs_lock);
@@ -2073,6 +2074,10 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 				    "storvsc uninstalled device\n");
 				mtx_unlock(&sc->hs_lock);
 			}
+		    } else {
+			ccb->ccb_h.status |= CAM_REQ_CMP;
+		    }
+		    pause("inq_delay", 7*hz);
 		} else {
 			ccb->ccb_h.status |= CAM_REQ_CMP;
 		}
