@@ -264,6 +264,9 @@ static const struct vmstor_proto vmstor_proto_list[] = {
         }
 };
 
+static struct root_hold_token   *root_mount_token = NULL;
+static bool                     storvsc_is_ready = FALSE;
+static struct mtx               root_mount_lock;
 /* static functions */
 static int storvsc_probe(device_t dev);
 static int storvsc_attach(device_t dev);
@@ -899,14 +902,12 @@ storvsc_attach(device_t dev)
 	struct cam_devq *devq;
 	int ret, i, j;
 	struct hv_storvsc_request *reqp;
-	struct root_hold_token *root_mount_token = NULL;
 	struct hv_sgl_node *sgl_node = NULL;
 	void *tmp_buff = NULL;
 
 	/*
 	 * We need to serialize storvsc attach calls.
 	 */
-	root_mount_token = root_mount_hold("storvsc");
 
 	sc = device_get_softc(dev);
 	sc->hs_chan = vmbus_get_channel(dev);
@@ -1030,7 +1031,6 @@ storvsc_attach(device_t dev)
 
 	mtx_unlock(&sc->hs_lock);
 
-	root_mount_rel(root_mount_token);
 	return (0);
 
 
@@ -1854,6 +1854,42 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
 	return(0);
 }
 
+#if 0
+static void
+storvsc_deliver_io_done(void* arg)
+{
+	struct hv_storvsc_request *reqp = arg;
+	struct storvsc_softc *sc = reqp->softc;
+	union ccb *ccb = reqp->ccb;
+	struct ccb_scsiio *csio = &ccb->csio;
+	struct vmscsi_req *vm_srb = &reqp->vstor_packet.u.vm_srb;
+
+	printf("storvsc_deliver_io_done begin\n");
+	ccb->csio.scsi_status = (vm_srb->scsi_status & 0xFF);
+	ccb->csio.resid = ccb->csio.dxfer_len - vm_srb->transfer_len;
+
+	if (reqp->sense_info_len != 0) {
+		csio->sense_resid = csio->sense_len - reqp->sense_info_len;
+		ccb->ccb_h.status |= CAM_AUTOSNS_VALID;
+	}
+
+	mtx_lock(&sc->hs_lock);
+	if (reqp->softc->hs_frozen == 1) {
+		xpt_print(ccb->ccb_h.path,
+			"%u: storvsc unfreezing softc 0x%p.\n",
+			ticks, reqp->softc);
+		ccb->ccb_h.status |= CAM_RELEASE_SIMQ;
+		reqp->softc->hs_frozen = 0;
+	}
+	storvsc_free_request(sc, reqp);
+	mtx_unlock(&sc->hs_lock);
+
+	xpt_done_direct(ccb);
+
+	atomic_subtract_int(&sc->hs_num_out_reqs, 1); // for drain out request
+	printf("storvsc_deliver_io_done end\n");
+}
+#endif
 /*
  * SCSI Inquiry checks qualifier and type.
  * If qualifier is 011b, means the device server is not capable
@@ -2010,7 +2046,36 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 				mtx_unlock(&sc->hs_lock);
 			}
 		    }
+		#if 0
+		    // pause for experiment: postpone the inquiry response
+		    if (root_mount_token != NULL &&
+			(ccb->ccb_h.status & CAM_REQ_CMP)) {
+			printf("callout_init\n");
+			callout_init(&reqp->callout, 1);
+			printf("callout_reset_sbt begin\n");
+			callout_reset_sbt(&reqp->callout, 7 * hz, 0,
+				storvsc_deliver_io_done, reqp, 0);
+			printf("callout_reset_sbt end\n");
+			return;
+		    }
+		#endif
 		} else {
+			if (cmd->opcode == READ_CAPACITY ||
+			     cmd->opcode == SERVICE_ACTION_IN) {
+			    printf("SCSI cmd 0x%x\n", cmd->opcode);
+			    if (root_mount_token != NULL) {
+				/**
+				 * XXX: Here it is supposed "READ_CAPACITY" is a notified
+				 * event for geom disk is ready, then root mount can be
+				 * continued.
+				 */
+				mtx_lock(&root_mount_lock);
+				storvsc_is_ready = true;
+				mtx_unlock(&root_mount_lock);
+				printf("wakeup root_mount_hold\n");
+				wakeup(&storvsc_is_ready);
+			    }
+			}
 			ccb->ccb_h.status |= CAM_REQ_CMP;
 		}
 	} else {
@@ -2055,7 +2120,6 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 static void
 storvsc_free_request(struct storvsc_softc *sc, struct hv_storvsc_request *reqp)
 {
-
 	LIST_INSERT_HEAD(&sc->hs_free_list, reqp, link);
 }
 
@@ -2079,3 +2143,42 @@ storvsc_get_storage_type(device_t dev)
 		return DRIVER_STORVSC;
 	return DRIVER_UNKNOWN;
 }
+
+static void
+hold_root_mount(void *arg __unused)
+{
+	mtx_init(&root_mount_lock, "root mount holding", NULL, MTX_DEF);
+	if (root_mount_token == NULL) {
+		root_mount_token = root_mount_hold("storvsc");
+	}
+}
+
+static void
+release_root_mount(void *arg __unused)
+{
+	int ret;
+	if (root_mount_token != NULL) {
+		mtx_lock(&root_mount_lock);
+		while (!storvsc_is_ready) {
+			if (bootverbose) {
+				printf("root mount waits for storage attaching\n");
+			}
+			ret = mtx_sleep(&storvsc_is_ready, &root_mount_lock, 0,
+				"waitstorvsc", 10 * hz);
+			if (ret == EWOULDBLOCK) {
+				if (bootverbose) {
+					printf("root mount waiting is timeout\n");
+				}
+				break;
+			}
+		}
+		mtx_unlock(&root_mount_lock);
+		root_mount_rel(root_mount_token);
+		root_mount_token = NULL;
+	}
+	mtx_destroy(&root_mount_lock);
+}
+
+SYSINIT(hold_root_mount, SI_SUB_AUDIT, SI_ORDER_ANY + 1, hold_root_mount, NULL);
+SYSINIT(release_root_mount, SI_SUB_SMP, SI_ORDER_ANY + 1, release_root_mount, NULL);
+
