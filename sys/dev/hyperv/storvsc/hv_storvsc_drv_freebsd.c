@@ -2079,6 +2079,7 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 		} else {
 			if (cmd->opcode == READ_CAPACITY ||
 			    cmd->opcode == SERVICE_ACTION_IN) {
+			    printf("Read capacity: 0x%x\n", cmd->opcode);
 			    if (root_mount_token != NULL) {
 				/**
 				 * XXX: Here it is supposed "READ_CAPACITY" is a notified
@@ -2174,19 +2175,19 @@ static void
 release_root_mount(void *arg __unused)
 {
 	int ret;
+	int try = 0;
 	if (root_mount_token != NULL) {
 		mtx_lock(&root_mount_lock);
 		while (!storvsc_is_ready) {
-			//if (bootverbose) {
 			printf("root mount waits for storage attaching\n");
-			//}
 			ret = mtx_sleep(&storvsc_is_ready, &root_mount_lock, 0,
 				"waitstorvsc", 10 * hz);
 			if (ret == EWOULDBLOCK) {
-				//if (bootverbose) {
-				printf("root mount waiting is timeout\n");
-				//}
-				break;
+				printf("root mount waiting is timeout, trying %d\n", try);
+				if (try == 3) {
+					break;
+				}
+				try++;
 			}
 		}
 		mtx_unlock(&root_mount_lock);
