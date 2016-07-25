@@ -2177,15 +2177,15 @@ release_root_mount(void *arg __unused)
 	if (root_mount_token != NULL) {
 		mtx_lock(&root_mount_lock);
 		while (!storvsc_is_ready) {
-			if (bootverbose) {
-				printf("root mount waits for storage attaching\n");
-			}
+			//if (bootverbose) {
+			printf("root mount waits for storage attaching\n");
+			//}
 			ret = mtx_sleep(&storvsc_is_ready, &root_mount_lock, 0,
 				"waitstorvsc", 10 * hz);
 			if (ret == EWOULDBLOCK) {
-				if (bootverbose) {
-					printf("root mount waiting is timeout\n");
-				}
+				//if (bootverbose) {
+				printf("root mount waiting is timeout\n");
+				//}
 				break;
 			}
 		}
