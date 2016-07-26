@@ -2198,4 +2198,4 @@ release_root_mount(void *arg __unused)
 }
 
 SYSINIT(hold_root_mount, SI_SUB_AUDIT, SI_ORDER_ANY + 1, hold_root_mount, NULL);
-SYSINIT(release_root_mount, SI_SUB_SMP, SI_ORDER_ANY + 1, release_root_mount, NULL);
+SYSINIT(release_root_mount, SI_SUB_SMP + 1, SI_ORDER_ANY, release_root_mount, NULL);
