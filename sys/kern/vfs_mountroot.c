@@ -734,6 +734,7 @@ parse_mount(char **conf)
 		do {
 			pause("rmdev", delay);
 			timeout -= delay;
+			printf("mountroot: left timeout %d\n", timeout);
 		} while (timeout > 0 && !parse_mount_dev_present(dev));
 		if (timeout <= 0) {
 			error = ENODEV;
