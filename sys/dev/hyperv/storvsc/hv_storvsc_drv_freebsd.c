@@ -225,6 +225,10 @@ enum hv_storage_type {
 
 #define HV_STORAGE_SUPPORTS_MULTI_CHANNEL 0x1
 
+#define IS_RUNNING_ON_WIN8_WIN2K12_R2                                \
+	(vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8_1 ||   \
+	 vmstor_proto_version== VMSTOR_PROTOCOL_VERSION_WIN8)
+
 /* {ba6163d9-04a1-4d29-b605-72e2ffb1dc7f} */
 static const struct hyperv_guid gStorVscDeviceType={
 	.hv_guid = {0xd9, 0x63, 0x61, 0xba, 0xa1, 0x04, 0x29, 0x4d,
@@ -2015,6 +2019,7 @@ create_storvsc_request(union ccb *ccb, struct hv_storvsc_request *reqp)
  * 
  * Return 1 if it is valid, 0 otherwise.
  */
+/*
 static inline int
 is_inquiry_valid(const struct scsi_inquiry_data *inq_data)
 {
@@ -2028,7 +2033,7 @@ is_inquiry_valid(const struct scsi_inquiry_data *inq_data)
 	}
 	return (1);
 }
-
+*/
 /**
  * @brief completion function before returning to CAM
  *
@@ -2110,7 +2115,7 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 		cmd = (const struct scsi_generic *)
 		    ((ccb->ccb_h.flags & CAM_CDB_POINTER) ?
 		     csio->cdb_io.cdb_ptr : csio->cdb_io.cdb_bytes);
-		if (cmd->opcode == INQUIRY) {
+		if (cmd->opcode == INQUIRY && (cmd->bytes[0] & SI_EVPD) == 0) {
 		    /*
 		     * The host of Windows 10 or 2016 server will response
 		     * the inquiry request with invalid data for unexisted device:
@@ -2132,9 +2137,21 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 		    /* Get the available buffer length */
 		    int resp_buf_len = resp_xfer_len >= 5 ? resp_buf[4] + 5 : 0;
 		    int data_len = (resp_buf_len < resp_xfer_len) ? resp_buf_len : resp_xfer_len;
+		#if 0
+		    if (data_len >= 3 &&                          // version field can be accessed
+			is_inquiry_valid(inq_data) == 0 &&        // invalid disk
+			SID_ANSI_REV(inq_data) < SCSI_REV_SPC2) { // lower version
+			/* XXX
+			 * lun scan will stop if lower than SPC2,
+			 * so we need to manually set it to SPC2
+			 * in order to force the lun scan.
+			 */
+			inq_data->version = SCSI_REV_SPC2;
+		    }
 		    if (data_len < SHORT_INQUIRY_LENGTH) {
-			ccb->ccb_h.status |= CAM_REQ_CMP;
-			if (bootverbose && data_len >= 5) {
+			if (SID_ANSI_REV(inq_data) != 0) {
+			    ccb->ccb_h.status |= CAM_REQ_CMP;
+			    if (bootverbose && data_len >= 5) {
 				mtx_lock(&sc->hs_lock);
 				xpt_print(ccb->ccb_h.path,
 				    "storvsc skips the validation for short inquiry (%d)"
@@ -2142,16 +2159,44 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 				    data_len,resp_buf[0],resp_buf[1],resp_buf[2],
 				    resp_buf[3],resp_buf[4]);
 				mtx_unlock(&sc->hs_lock);
-			}
-		    } else if (is_inquiry_valid(inq_data) == 0) {
-			ccb->ccb_h.status |= CAM_DEV_NOT_THERE;
-			if (bootverbose && data_len >= 5) {
+			    }
+			} else {
+			    ccb->ccb_h.status |= CAM_DEV_NOT_THERE;
+			    if (bootverbose) {
 				mtx_lock(&sc->hs_lock);
 				xpt_print(ccb->ccb_h.path,
-				    "storvsc uninstalled invalid device"
+				    "storvsc invalid short inquiry (%d)"
 				    " [%x %x %x %x %x]\n",
-				resp_buf[0],resp_buf[1],resp_buf[2],resp_buf[3],resp_buf[4]);
+				    data_len,resp_buf[0],resp_buf[1],resp_buf[2],
+				    resp_buf[3],resp_buf[4]);
 				mtx_unlock(&sc->hs_lock);
+			    }
+			}
+		#endif
+		    ccb->ccb_h.status |= CAM_REQ_CMP;
+		    if (bootverbose && data_len >= 5) {
+			mtx_lock(&sc->hs_lock);
+			xpt_print(ccb->ccb_h.path,
+			    "storvsc inquiry response (%d)"
+			    " [%x %x %x %x %x ... ]\n",
+			    data_len,resp_buf[0],resp_buf[1],resp_buf[2],
+			    resp_buf[3],resp_buf[4]);
+			mtx_unlock(&sc->hs_lock);
+		    }
+		    if (inq_data->version == 0 &&
+			inq_data->response_format == 0) {
+			/*
+			 * This is an invalid device, we need to
+			 * inform CAM layer by filling some fields.
+			 */
+			inq_data->device = (SID_QUAL_BAD_LU << 5) | T_NODEVICE;
+			inq_data->version = SCSI_REV_SPC3;
+			inq_data->response_format = 0x2;
+			if (bootverbose && data_len >= 5) {
+			    mtx_lock(&sc->hs_lock);
+			    xpt_print(ccb->ccb_h.path,
+				"storvsc invalid disk detected\n"
+			    mtx_unlock(&sc->hs_lock);
 			}
 		    } else {
 			char vendor[16];
@@ -2161,10 +2206,10 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 			 * XXX: upgrade SPC2 to SPC3 if host is WIN8 or WIN2012 R2
 			 * in order to support UNMAP feature
 			 */
-			if (!strncmp(vendor,"Msft",4) &&
+			if (!strncmp(vendor, "Msft", 4) &&
 			     SID_ANSI_REV(inq_data) == SCSI_REV_SPC2 &&
 			     (vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8_1 ||
-				vmstor_proto_version== VMSTOR_PROTOCOL_VERSION_WIN8)) {
+				vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8)) {
 				inq_data->version = SCSI_REV_SPC3;
 				if (bootverbose) {
 					mtx_lock(&sc->hs_lock);
@@ -2172,14 +2217,6 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 						"storvsc upgrades SPC2 to SPC3\n");
 					mtx_unlock(&sc->hs_lock);
 				}
-			}
-			ccb->ccb_h.status |= CAM_REQ_CMP;
-			if (bootverbose) {
-				mtx_lock(&sc->hs_lock);
-				xpt_print(ccb->ccb_h.path,
-				    "storvsc has passed inquiry response (%d) validation\n",
-				    data_len);
-				mtx_unlock(&sc->hs_lock);
 			}
 		    }
 		} else {
