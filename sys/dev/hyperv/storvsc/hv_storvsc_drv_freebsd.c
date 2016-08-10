@@ -742,6 +742,7 @@ hv_storvsc_on_iocompletion(struct storvsc_softc *sc,
 	 * because the fields will be used later in storvsc_io_done().
 	 */
 	request->vstor_packet.u.vm_srb.scsi_status = vm_srb->scsi_status;
+	request->vstor_packet.u.vm_srb.srb_status = vm_srb->srb_status;
 	request->vstor_packet.u.vm_srb.transfer_len = vm_srb->transfer_len;
 
 	if (((vm_srb->scsi_status & 0xFF) == SCSI_STATUS_CHECK_COND) &&
@@ -2098,18 +2099,37 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 	}
 #endif
 
+	const struct scsi_generic *cmd;
+	/*
+	 * Check whether the data for INQUIRY cmd is valid or
+	 * not.  Windows 10 and Windows 2016 send all zero
+	 * inquiry data to VM even for unpopulated slots.
+	 */
+	cmd = (const struct scsi_generic *)
+	    ((ccb->ccb_h.flags & CAM_CDB_POINTER) ?
+	     csio->cdb_io.cdb_ptr : csio->cdb_io.cdb_bytes);
+	if (cmd->opcode == MODE_SENSE_10 || cmd->opcode == MODE_SENSE_6) {
+		mtx_lock(&sc->hs_lock);
+		xpt_print(ccb->ccb_h.path, "mode sense, status %d\n",
+		    vm_srb->scsi_status);
+		mtx_unlock(&sc->hs_lock);
+	} else if (cmd->opcode == INQUIRY) {
+		const struct scsi_inquiry *inq_cmd =
+			( const struct scsi_inquiry *)cmd;
+		mtx_lock(&sc->hs_lock);
+		xpt_print(ccb->ccb_h.path, "INQUIRY cmd (scsi_status: %d, srb_status: %d) "
+			" 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+			vm_srb->scsi_status, vm_srb->srb_status,
+			inq_cmd->opcode, inq_cmd->byte2,
+			inq_cmd->page_code, inq_cmd->length[0],
+			inq_cmd->length[1], inq_cmd->control);
+		mtx_unlock(&sc->hs_lock);
+	}
+
 	ccb->ccb_h.status &= ~CAM_SIM_QUEUED;
 	ccb->ccb_h.status &= ~CAM_STATUS_MASK;
 	if (vm_srb->scsi_status == SCSI_STATUS_OK) {
-		const struct scsi_generic *cmd;
-		/*
-		 * Check whether the data for INQUIRY cmd is valid or
-		 * not.  Windows 10 and Windows 2016 send all zero
-		 * inquiry data to VM even for unpopulated slots.
-		 */
-		cmd = (const struct scsi_generic *)
-		    ((ccb->ccb_h.flags & CAM_CDB_POINTER) ?
-		     csio->cdb_io.cdb_ptr : csio->cdb_io.cdb_bytes);
+		ccb->ccb_h.status |= CAM_REQ_CMP;
 		if (cmd->opcode == INQUIRY) {
 		    /*
 		     * The host of Windows 10 or 2016 server will response
@@ -2130,41 +2150,60 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 		    /* Get the buffer length reported by host */
 		    int resp_xfer_len = vm_srb->transfer_len;
 		    /* Get the available buffer length */
-		    int resp_buf_len = resp_xfer_len >= 5 ? resp_buf[4] + 5 : 0;
-		    int data_len = (resp_buf_len < resp_xfer_len) ? resp_buf_len : resp_xfer_len;
-		    if (data_len < SHORT_INQUIRY_LENGTH) {
-			ccb->ccb_h.status |= CAM_REQ_CMP;
-			if (bootverbose && data_len >= 5) {
+		    int resp_buf_len = resp_xfer_len >= 5 ?
+					resp_buf[4] + 5 : 0;
+		    int data_len = (resp_buf_len < resp_xfer_len) ?
+					resp_buf_len : resp_xfer_len;
+		    if (bootverbose && data_len >= 5) {
+			mtx_lock(&sc->hs_lock);
+			xpt_print(ccb->ccb_h.path,
+			    "storvsc inquiry (%d)"
+			    " [%x %x %x %x %x ... ]\n",
+			    data_len, resp_buf[0], resp_buf[1], resp_buf[2],
+			    resp_buf[3], resp_buf[4]);
+			mtx_unlock(&sc->hs_lock);
+		    }
+		    if ((cmd->bytes[0] & SI_EVPD) == 0) {
+			if (SID_ANSI_REV(inq_data) == 0 &&
+			    inq_data->response_format == 0) {
+			    inq_data->device = (SID_QUAL_BAD_LU << 5) | T_NODEVICE;
+			    inq_data->version = SCSI_REV_SPC3;
+			    inq_data->response_format = 0x2; // less than 2 are obsolete
+			    if (bootverbose) {
 				mtx_lock(&sc->hs_lock);
 				xpt_print(ccb->ccb_h.path,
-				    "storvsc skips the validation for short inquiry (%d)"
-				    " [%x %x %x %x %x]\n",
-				    data_len,resp_buf[0],resp_buf[1],resp_buf[2],
-				    resp_buf[3],resp_buf[4]);
+				    "storvsc invalid inquiry for all zeros "
+				    "for version and response_format\n");
 				mtx_unlock(&sc->hs_lock);
+			    }
 			}
-		    } else if (is_inquiry_valid(inq_data) == 0) {
-			ccb->ccb_h.status |= CAM_DEV_NOT_THERE;
-			if (bootverbose && data_len >= 5) {
-				mtx_lock(&sc->hs_lock);
-				xpt_print(ccb->ccb_h.path,
-				    "storvsc uninstalled invalid device"
-				    " [%x %x %x %x %x]\n",
-				resp_buf[0],resp_buf[1],resp_buf[2],resp_buf[3],resp_buf[4]);
-				mtx_unlock(&sc->hs_lock);
+			if (!is_inquiry_valid(inq_data)) {
+			    // handle invalid inquiry response
+			    if (ccb->ccb_h.path->device->lun_id == 0) {
+				//uint8_t dev_type = SID_TYPE(inq_data);
+				inq_data->device = (SID_QUAL_LU_OFFLINE << 5);
+							//dev_type;
+				if (bootverbose) {
+				    mtx_lock(&sc->hs_lock);
+				    xpt_print(ccb->ccb_h.path,
+					"storvsc invalid inquiry for lun 0\n");
+				    mtx_unlock(&sc->hs_lock);
+				}
+			    }
 			}
-		    } else {
-			char vendor[16];
-			cam_strvis(vendor, inq_data->vendor, sizeof(inq_data->vendor),
+			
+			if (data_len > SHORT_INQUIRY_LENGTH) {
+			    char vendor[16];
+			    cam_strvis(vendor, inq_data->vendor, sizeof(inq_data->vendor),
 				sizeof(vendor));
-			/**
-			 * XXX: upgrade SPC2 to SPC3 if host is WIN8 or WIN2012 R2
-			 * in order to support UNMAP feature
-			 */
-			if (!strncmp(vendor,"Msft",4) &&
-			     SID_ANSI_REV(inq_data) == SCSI_REV_SPC2 &&
-			     (vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8_1 ||
-				vmstor_proto_version== VMSTOR_PROTOCOL_VERSION_WIN8)) {
+			    /**
+			     * XXX: upgrade SPC2 to SPC3 if host is WIN8 or WIN2012 R2
+			     * in order to support UNMAP feature
+			     */
+			    if (!strncmp(vendor, "Msft", 4) &&
+				SID_ANSI_REV(inq_data) == SCSI_REV_SPC2 &&
+				(vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8_1 ||
+				 vmstor_proto_version == VMSTOR_PROTOCOL_VERSION_WIN8)) {
 				inq_data->version = SCSI_REV_SPC3;
 				if (bootverbose) {
 					mtx_lock(&sc->hs_lock);
@@ -2172,18 +2211,11 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 						"storvsc upgrades SPC2 to SPC3\n");
 					mtx_unlock(&sc->hs_lock);
 				}
-			}
-			ccb->ccb_h.status |= CAM_REQ_CMP;
-			if (bootverbose) {
-				mtx_lock(&sc->hs_lock);
-				xpt_print(ccb->ccb_h.path,
-				    "storvsc has passed inquiry response (%d) validation\n",
-				    data_len);
-				mtx_unlock(&sc->hs_lock);
-			}
+			    }
+		        }
 		    }
 		} else {
-			ccb->ccb_h.status |= CAM_REQ_CMP;
+		    ccb->ccb_h.status |= CAM_REQ_CMP;
 		}
 	} else {
 		mtx_lock(&sc->hs_lock);

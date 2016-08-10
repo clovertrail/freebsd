@@ -181,7 +181,8 @@ typedef enum {
 	PROBE_INQUIRY_CKSUM	= 0x01,
 	PROBE_SERIAL_CKSUM	= 0x02,
 	PROBE_NO_ANNOUNCE	= 0x04,
-	PROBE_EXTLUN		= 0x08
+	PROBE_EXTLUN		= 0x08,
+	PROBE_VPD_CHANGED	= 0X10
 } probe_flags;
 
 typedef struct {
@@ -1425,12 +1426,36 @@ out:
 	{
 		struct ccb_scsiio *csio;
 		struct scsi_vpd_supported_page_list *page_list;
+		int supported_vpds_len = 0;
+		uint8_t *supported_vpds = NULL;
 
 		csio = &done_ccb->csio;
 		page_list =
 		    (struct scsi_vpd_supported_page_list *)csio->data_ptr;
-
+		if (page_list != NULL && CCB_COMPLETED_OK(csio->ccb_h)) {
+			supported_vpds_len = page_list->length +
+			    SVPD_SUPPORTED_PAGES_HDR_LEN;
+			supported_vpds = (uint8_t *)page_list;
+			xpt_print(path, "XXXXXXX VPD device %02x, len %d\n",
+			    page_list->device, page_list->length);
+			if (page_list->length == 0 &&
+			    SID_QUAL(&path->device->inq_data) == SID_QUAL_LU_CONNECTED) {
+				xpt_print(path,
+				    "XXXXXXX 0 VPDs, device offline\n");
+				path->device->inq_data.device = (SID_QUAL_LU_OFFLINE << 5);
+			}
+		}
+		
 		if (path->device->supported_vpds != NULL) {
+			softc->flags &= ~PROBE_VPD_CHANGED;
+			if (supported_vpds != NULL &&
+			    (path->device->supported_vpds_len !=
+			     supported_vpds_len ||
+			     memcmp(path->device->supported_vpds,
+			        supported_vpds, supported_vpds_len) != 0)) {
+				xpt_print(path, "XXXXXXXX supported VPDs changed\n");
+				softc->flags |= PROBE_VPD_CHANGED;
+			}
 			free(path->device->supported_vpds, M_CAMXPT);
 			path->device->supported_vpds = NULL;
 			path->device->supported_vpds_len = 0;
@@ -1442,9 +1467,8 @@ out:
 			 */
 		} else if (CCB_COMPLETED_OK(csio->ccb_h)) {
 			/* Got vpd list */
-			path->device->supported_vpds_len = page_list->length +
-			    SVPD_SUPPORTED_PAGES_HDR_LEN;
-			path->device->supported_vpds = (uint8_t *)page_list;
+			path->device->supported_vpds_len = supported_vpds_len;
+			path->device->supported_vpds = supported_vpds;
 			xpt_release_ccb(done_ccb);
 			PROBE_SET_ACTION(softc, PROBE_DEVICE_ID);
 			xpt_schedule(periph, priority);
@@ -1630,21 +1654,29 @@ probe_device_check:
 					  serial_buf->length);
 
 			MD5Final(digest, &context);
-			if (bcmp(softc->digest, digest, 16) == 0)
+			if (bcmp(softc->digest, digest, 16) == 0) {
+				xpt_print(path, "XXXXXXXXXXXXXX inquiry cksum unchanged\n");
+				if ((softc->flags & PROBE_VPD_CHANGED) == 0) {
+					xpt_print(path, "XXXXXXXXXXXXXX VPD unchanged\n");
+					changed = 0;
+				}
 				changed = 0;
-
+			}
 			/*
 			 * XXX Do we need to do a TUR in order to ensure
 			 *     that the device really hasn't changed???
 			 */
 			if ((changed != 0)
-			 && ((softc->flags & PROBE_NO_ANNOUNCE) == 0))
+			 && ((softc->flags & PROBE_NO_ANNOUNCE) == 0)) {
+				xpt_print(path, "XXXXXXXXXXXXXX LOST DEVICE\n");
 				xpt_async(AC_LOST_DEVICE, path, NULL);
+			}
 		}
 		if (serial_buf != NULL)
 			free(serial_buf, M_CAMXPT);
 
 		if (changed != 0) {
+			xpt_print(path, "XXXXXXXXXXXXXX negotiate\n");
 			/*
 			 * Now that we have all the necessary
 			 * information to safely perform transfer
@@ -1859,6 +1891,7 @@ probe_purge_old(struct cam_path *path, struct scsi_report_luns_data *new,
 
 		if (xpt_create_path(&tp, NULL, xpt_path_path_id(path),
 		    xpt_path_target_id(path), this_lun) == CAM_REQ_CMP) {
+			xpt_print(path, "XXXXXXXXXXXXXXXXXXX LOST DEVICE RPTLUN\n");
 			xpt_async(AC_LOST_DEVICE, tp, NULL);
 			xpt_free_path(tp);
 		}
