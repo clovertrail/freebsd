@@ -171,6 +171,10 @@ struct vmbus_chanpkt_prplist {
 	struct vmbus_gpa_range cp_range[];
 } __packed;
 
+#define MAX_SIZE_BUFRING_ITEM(GPA_PAGE_CNT, SRB_SIZE)		\
+	(roundup2(__offsetof(struct vmbus_chanpkt_prplist,	\
+		cp_range[0].gpa_page[GPA_PAGE_CNT]) + SRB_SIZE,	\
+		VMBUS_CHANPKT_SIZE_ALIGN) + sizeof(uint64_t))
 /*
  * Channel messages
  * - Embedded in vmbus_message.msg_data, e.g. response and notification.

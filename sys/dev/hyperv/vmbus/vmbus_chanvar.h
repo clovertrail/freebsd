@@ -133,6 +133,7 @@ struct vmbus_channel {
 	struct hyperv_guid		ch_guid_inst;
 
 	struct sysctl_ctx_list		ch_sysctl_ctx;
+	u_int				ch_stat_send_nreq;
 } __aligned(CACHE_LINE_SIZE);
 
 #define VMBUS_CHAN_ISPRIMARY(chan)	((chan)->ch_subidx == 0)
