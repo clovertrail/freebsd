@@ -332,11 +332,15 @@ hv_kvp_convert_utf16_ipinfo_to_utf8(struct hv_kvp_ip_msg *host_ip_msg,
 
 	if (devclass_get_devices(devclass_find("hn"), &devs, &devcnt) == 0) {
 		for (devcnt = devcnt - 1; devcnt >= 0; devcnt--) {
-			/* XXX access other driver's softc?  are you kidding? */
+			/*
+			 * GUID from host is like {90985724-3b88-4979-9832-7e03c5ee4d32},
+			 * but NIC's GUID is like 90985724-3b88-4979-9832-7e03c5ee4d32,
+			 * so in order to match them, '{}' should be handled.
+			 */
 			device_t dev = devs[devcnt];
 			struct vmbus_channel *chan;
 			char buf[HYPERV_GUID_STRLEN];
-
+			char normal_buf[HYPERV_GUID_STRLEN + 2];
 			/*
 			 * Trying to find GUID of Network Device
 			 */
@@ -344,7 +348,8 @@ hv_kvp_convert_utf16_ipinfo_to_utf8(struct hv_kvp_ip_msg *host_ip_msg,
 			hyperv_guid2str(vmbus_chan_guid_inst(chan),
 			    buf, sizeof(buf));
 
-			if (strncmp(buf, (char *)umsg->body.kvp_ip_val.adapter_id,
+			snprintf(normal_buf, HYPERV_GUID_STRLEN + 2, "{%s}", buf);
+			if (strncmp(normal_buf, (char *)umsg->body.kvp_ip_val.adapter_id,
 			    HYPERV_GUID_STRLEN - 1) == 0) {
 				strlcpy((char *)umsg->body.kvp_ip_val.adapter_id,
 				    device_get_nameunit(dev), MAX_ADAPTER_ID_SIZE);
