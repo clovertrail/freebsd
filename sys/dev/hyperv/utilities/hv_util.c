@@ -43,6 +43,7 @@
 #include <dev/hyperv/include/hyperv.h>
 #include <dev/hyperv/include/vmbus.h>
 #include <dev/hyperv/utilities/hv_util.h>
+#include <dev/hyperv/utilities/hv_utilreg.h>
 #include <dev/hyperv/utilities/vmbus_icreg.h>
 
 #include "vmbus_if.h"
@@ -286,4 +287,84 @@ hv_util_detach(device_t dev)
 	free(sc->receive_buffer, M_DEVBUF);
 
 	return (0);
+}
+
+/*
+ * version neogtiation function
+ * Create default response for Hyper-V Negotiate message
+ * @buf: Raw buffer channel data
+ * @framewrk_ver specifies the  framework version that we can support
+ * @service_ver specifies the service version we can support.
+ */
+
+boolean_t
+hv_util_negotiate_version(uint8_t *buf, int framewrk_ver, int service_ver)
+{
+	struct hv_vmbus_icmsg_negotiate *negop;
+	int icmsg_major, icmsg_minor;
+	int fw_major, fw_minor;
+	int srv_major, srv_minor;
+	int i;
+	int icframe_major, icframe_minor;
+	struct hv_vmbus_icmsg_hdr *icmsghdrp;
+	boolean_t found = FALSE;
+
+	icmsghdrp = (struct hv_vmbus_icmsg_hdr *)
+	    &buf[sizeof(struct hv_vmbus_pipe_hdr)];
+	icmsghdrp->icmsgsize = 0x10;
+
+	fw_major = (framewrk_ver >> 16);
+	fw_minor = (framewrk_ver & 0xFFFF);
+
+	srv_major = (service_ver >> 16);
+	srv_minor = (service_ver & 0xFFFF);
+
+	negop = (struct hv_vmbus_icmsg_negotiate *)&buf[
+		sizeof(struct hv_vmbus_pipe_hdr) +
+		sizeof(struct hv_vmbus_icmsg_hdr)];
+
+	icframe_major = negop->icframe_vercnt;
+	icframe_minor = 0;
+	icmsg_major = negop->icmsg_vercnt;
+	icmsg_minor = 0;
+	/*
+	 * Select the framework version number we will support
+	 */
+	for (i = 0; i < negop->icframe_vercnt; i++) {
+		if ((negop->icversion_data[i].major == fw_major) &&
+		   (negop->icversion_data[i].minor == fw_minor)) {
+			icframe_major = negop->icversion_data[i].major;
+			icframe_minor = negop->icversion_data[i].minor;
+			found = true;
+		}
+	}
+
+	if (!found)
+		goto handle_error;
+	found = false;
+
+	for (i = negop->icframe_vercnt;
+	    i < negop->icframe_vercnt + negop->icmsg_vercnt; i++) {
+		if ((negop->icversion_data[i].major == srv_major) &&
+		   (negop->icversion_data[i].minor == srv_minor)) {
+			icmsg_major = negop->icversion_data[i].major;
+			icmsg_minor = negop->icversion_data[i].minor;
+			found = true;
+		}
+	}
+
+handle_error:
+	if (!found) {
+		negop->icframe_vercnt = 0;
+		negop->icmsg_vercnt = 0;
+	} else {
+		negop->icframe_vercnt = 1;
+		negop->icmsg_vercnt = 1;
+	}
+
+	negop->icversion_data[0].major = icframe_major;
+	negop->icversion_data[0].minor = icframe_minor;
+	negop->icversion_data[1].major = icmsg_major;
+	negop->icversion_data[1].minor = icmsg_minor;
+	return found;
 }

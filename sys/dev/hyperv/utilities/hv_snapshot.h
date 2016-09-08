@@ -1,7 +1,5 @@
 /*-
- * Copyright (c) 2009-2012,2016 Microsoft Corp.
- * Copyright (c) 2012 NetApp Inc.
- * Copyright (c) 2012 Citrix Inc.
+ * Copyright (c) 2016 Microsoft Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,37 +26,29 @@
  * $FreeBSD$
  */
 
-#ifndef _HVUTIL_H_
-#define _HVUTIL_H_
+#ifndef _VSS_H
+#define _VSS_H
+#include <sys/ioccom.h>
+#include "hv_common.h"
+#define FS_VSS_DEV_NAME		"hv_fsvss_dev"
+#define APP_VSS_DEV_NAME	"hv_appvss_dev"
 
-#include <dev/hyperv/include/hyperv.h>
-#include <dev/hyperv/include/vmbus.h>
+#define VSS_SUCCESS		0x00000000
+#define VSS_FAIL		0x00000001
 
-/**
- * hv_util related structures
- *
- */
-typedef struct hv_util_sc {
-	device_t		ic_dev;
-	uint8_t			*receive_buffer;
-	int			ic_buflen;
-	uint32_t		ic_fwver;	/* framework version */
-	uint32_t		ic_msgver;	/* message version */
-} hv_util_sc;
-
-struct vmbus_ic_desc {
-	const struct hyperv_guid	ic_guid;
-	const char			*ic_desc;
+enum hv_vss_op_t {
+	HV_VSS_NONE = 0,
+	HV_VSS_CHECK,
+	HV_VSS_FREEZE,
+	HV_VSS_THAW,
+	HV_VSS_COUNT
 };
 
-#define VMBUS_IC_DESC_END	{ .ic_desc = NULL }
-
-int		hv_util_attach(device_t dev, vmbus_chan_callback_t cb);
-int		hv_util_detach(device_t dev);
-int		vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[]);
-int		vmbus_ic_negomsg(struct hv_util_sc *sc, void *data, int *dlen,
-		    uint32_t fw_ver, uint32_t msg_ver);
-
-boolean_t	hv_util_negotiate_version(uint8_t *buf,
-		    int framewrk_ver, int service_ver);
+struct hv_vss_opt_msg {
+	uint32_t	opt;		/* operation */
+	uint32_t	status;		/* 0 for success, 1 for error */
+	uint64_t	msgid;		/* an ID used to identify the transaction */
+};
+#define IOCHVVSSREAD		_IOR('v', 2, struct hv_vss_opt_msg)
+#define IOCHVVSSWRITE		_IOW('v', 3, struct hv_vss_opt_msg)
 #endif

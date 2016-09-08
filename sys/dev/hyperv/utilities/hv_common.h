@@ -27,38 +27,21 @@
  *
  * $FreeBSD$
  */
-
-#ifndef _HVUTIL_H_
-#define _HVUTIL_H_
-
-#include <dev/hyperv/include/hyperv.h>
-#include <dev/hyperv/include/vmbus.h>
-
-/**
- * hv_util related structures
- *
+#ifndef _HVCOMMON_H_
+#define _HVCOMMON_H_
+/*
+ * Some Hyper-V status codes.
  */
-typedef struct hv_util_sc {
-	device_t		ic_dev;
-	uint8_t			*receive_buffer;
-	int			ic_buflen;
-	uint32_t		ic_fwver;	/* framework version */
-	uint32_t		ic_msgver;	/* message version */
-} hv_util_sc;
+#define HV_S_OK                          0x00000000
+#define HV_E_FAIL                        0x80004005
+#define HV_S_CONT                        0x80070103
+#define HV_ERROR_NOT_SUPPORTED           0x80070032
+#define HV_ERROR_MACHINE_LOCKED          0x800704F7
+#define HV_ERROR_DEVICE_NOT_CONNECTED    0x8007048F
+#define HV_INVALIDARG                    0x80070057
+#define HV_GUID_NOTFOUND                 0x80041002
 
-struct vmbus_ic_desc {
-	const struct hyperv_guid	ic_guid;
-	const char			*ic_desc;
-};
-
-#define VMBUS_IC_DESC_END	{ .ic_desc = NULL }
-
-int		hv_util_attach(device_t dev, vmbus_chan_callback_t cb);
-int		hv_util_detach(device_t dev);
-int		vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[]);
-int		vmbus_ic_negomsg(struct hv_util_sc *sc, void *data, int *dlen,
-		    uint32_t fw_ver, uint32_t msg_ver);
-
-boolean_t	hv_util_negotiate_version(uint8_t *buf,
-		    int framewrk_ver, int service_ver);
+/* status returned to daemon */
+#define SUCCESS		(0)
+#define ERROR		(1)
 #endif

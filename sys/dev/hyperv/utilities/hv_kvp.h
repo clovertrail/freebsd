@@ -110,7 +110,6 @@
  * (not supported), a NULL key string is returned.
  */
 
- 
 /*
  * Registry value types.
  */
@@ -118,7 +117,13 @@
 #define HV_REG_U32    4
 #define HV_REG_U64    8
 
+#define ADDR_FAMILY_NONE                 0x00
+#define ADDR_FAMILY_IPV4                 0x01
+#define ADDR_FAMILY_IPV6                 0x02
 
+#define MAX_ADAPTER_ID_SIZE              128
+#define MAX_IP_ADDR_SIZE                 1024
+#define MAX_GATEWAY_SIZE                 512
 /*
  * Daemon code supporting IP injection.
  */
@@ -151,7 +156,6 @@ enum hv_kvp_exchg_pool {
 #define MAX_ADAPTER_ID_SIZE              128
 #define MAX_IP_ADDR_SIZE                 1024
 #define MAX_GATEWAY_SIZE                 512
-
 
 struct hv_kvp_ipaddr_value {
 	uint16_t adapter_id[MAX_ADAPTER_ID_SIZE];

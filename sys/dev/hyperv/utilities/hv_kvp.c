@@ -68,6 +68,7 @@ __FBSDID("$FreeBSD$");
 #include "hv_util.h"
 #include "unicode.h"
 #include "hv_kvp.h"
+#include "hv_common.h"
 #include "vmbus_if.h"
 
 /* hv_kvp defines */
@@ -590,6 +591,7 @@ hv_kvp_process_request(void *context, int pending)
 	hv_kvp_log_info("%s: entering hv_kvp_process_request\n", __func__);
 
 	sc = (hv_kvp_sc*)context;
+
 	kvp_buf = sc->util_sc.receive_buffer;
 	channel = vmbus_get_channel(sc->dev);
 
