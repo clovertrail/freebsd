@@ -82,9 +82,7 @@ vmbus_shutdown_cb(struct vmbus_channel *chan, void *xsc)
 	 */
 	switch (hdr->ic_type) {
 	case VMBUS_ICMSG_TYPE_NEGOTIATE:
-		error = vmbus_ic_negomsg(sc, data, &dlen);
-		if (error)
-			return;
+		hv_util_negotiate_version(data, util_fw_ver, sd_srv_ver);
 		break;
 
 	case VMBUS_ICMSG_TYPE_SHUTDOWN:

@@ -43,6 +43,8 @@
 #include <dev/hyperv/include/vmbus.h>
 #include <dev/hyperv/utilities/hv_util.h>
 #include <dev/hyperv/utilities/vmbus_icreg.h>
+#include <dev/hyperv/utilities/hv_utilreg.h>
+#include <dev/hyperv/utilities/hv_common.h>
 
 #include "vmbus_if.h"
 
@@ -53,53 +55,11 @@
 	__offsetof(struct vmbus_icmsg_negotiate, ic_ver[VMBUS_IC_VERCNT])
 CTASSERT(VMBUS_IC_NEGOSZ < VMBUS_IC_BRSIZE);
 
-int
-vmbus_ic_negomsg(struct hv_util_sc *sc, void *data, int *dlen0)
-{
-	struct vmbus_icmsg_negotiate *nego;
-	int cnt, major, dlen = *dlen0;
-
-	/*
-	 * Preliminary message size verification
-	 */
-	if (dlen < sizeof(*nego)) {
-		device_printf(sc->ic_dev, "truncated ic negotiate, len %d\n",
-		    dlen);
-		return EINVAL;
-	}
-	nego = data;
-
-	cnt = nego->ic_fwver_cnt + nego->ic_msgver_cnt;
-	if (dlen < __offsetof(struct vmbus_icmsg_negotiate, ic_ver[cnt])) {
-		device_printf(sc->ic_dev, "ic negotiate does not contain "
-		    "versions %d\n", dlen);
-		return EINVAL;
-	}
-
-	/* Select major version; XXX looks wrong. */
-	if (nego->ic_fwver_cnt >= 2 && VMBUS_ICVER_MAJOR(nego->ic_ver[1]) == 3)
-		major = 3;
-	else
-		major = 1;
-
-	/* One framework version */
-	nego->ic_fwver_cnt = 1;
-	nego->ic_ver[0] = VMBUS_IC_VERSION(major, 0);
-
-	/* One message version */
-	nego->ic_msgver_cnt = 1;
-	nego->ic_ver[1] = VMBUS_IC_VERSION(major, 0);
-
-	/* Update data size */
-	nego->ic_hdr.ic_dsize = VMBUS_IC_NEGOSZ -
-	    sizeof(struct vmbus_icmsg_hdr);
-
-	/* Update total size, if necessary */
-	if (dlen < VMBUS_IC_NEGOSZ)
-		*dlen0 = VMBUS_IC_NEGOSZ;
-
-	return 0;
-}
+int util_fw_ver = UTIL_FW_VERSION;
+int sd_srv_ver  = SD_VERSION;
+int ts_srv_ver  = TS_VERSION;
+int hb_srv_ver  = HB_VERSION;
+int kvp_srv_ver = KVP_WIN8_SRV_VERSION;
 
 int
 vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[])
@@ -124,13 +84,37 @@ hv_util_attach(device_t dev, vmbus_chan_callback_t cb)
 {
 	struct hv_util_sc *sc = device_get_softc(dev);
 	struct vmbus_channel *chan = vmbus_get_channel(dev);
+	uint32_t vmbus_version;
 	int error;
 
+	vmbus_version = VMBUS_GET_VERSION(device_get_parent(dev), dev);
 	sc->ic_dev = dev;
 	sc->ic_buflen = VMBUS_IC_BRSIZE;
 	sc->receive_buffer = malloc(VMBUS_IC_BRSIZE, M_DEVBUF,
 	    M_WAITOK | M_ZERO);
 
+	switch(vmbus_version) {
+	case VMBUS_VERSION_WS2008:
+		util_fw_ver = UTIL_WS2K8_FW_VERSION;
+		kvp_srv_ver = KVP_WS2008_SRV_VERSION;
+		sd_srv_ver = SD_WS2008_VERSION;
+		ts_srv_ver = TS_WS2008_VERSION;
+		hb_srv_ver = HB_WS2008_VERSION;
+		break;
+	case VMBUS_VERSION_WIN7:
+		util_fw_ver = UTIL_FW_VERSION;
+		kvp_srv_ver = KVP_WIN7_SRV_VERSION;
+		sd_srv_ver = SD_VERSION;
+		ts_srv_ver = TS_VERSION;
+		hb_srv_ver = HB_VERSION;
+		break;
+	default:
+		util_fw_ver = UTIL_FW_VERSION;
+		kvp_srv_ver = KVP_WIN8_SRV_VERSION;
+		sd_srv_ver = SD_VERSION;
+		ts_srv_ver = TS_VERSION;
+		hb_srv_ver = HB_VERSION;
+	}
 	/*
 	 * These services are not performance critical and do not need
 	 * batched reading. Furthermore, some services such as KVP can
@@ -158,4 +142,84 @@ hv_util_detach(device_t dev)
 	free(sc->receive_buffer, M_DEVBUF);
 
 	return (0);
+}
+
+/*
+ * version neogtiation function
+ * Create default response for Hyper-V Negotiate message
+ * @buf: Raw buffer channel data
+ * @framewrk_ver specifies the  framework version that we can support
+ * @service_ver specifies the service version we can support.
+ */
+
+boolean_t
+hv_util_negotiate_version(uint8_t *buf, int framewrk_ver, int service_ver)
+{
+	struct hv_vmbus_icmsg_negotiate *negop;
+	int icmsg_major, icmsg_minor;
+	int fw_major, fw_minor;
+	int srv_major, srv_minor;
+	int i;
+	int icframe_major, icframe_minor;
+	struct hv_vmbus_icmsg_hdr *icmsghdrp;
+	boolean_t found = FALSE;
+
+	icmsghdrp = (struct hv_vmbus_icmsg_hdr *)
+	    &buf[sizeof(struct hv_vmbus_pipe_hdr)];
+	icmsghdrp->icmsgsize = 0x10;
+
+	fw_major = (framewrk_ver >> 16);
+	fw_minor = (framewrk_ver & 0xFFFF);
+
+	srv_major = (service_ver >> 16);
+	srv_minor = (service_ver & 0xFFFF);
+
+	negop = (struct hv_vmbus_icmsg_negotiate *)&buf[
+		sizeof(struct hv_vmbus_pipe_hdr) +
+		sizeof(struct hv_vmbus_icmsg_hdr)];
+
+	icframe_major = negop->icframe_vercnt;
+	icframe_minor = 0;
+	icmsg_major = negop->icmsg_vercnt;
+	icmsg_minor = 0;
+	/*
+	 * Select the framework version number we will support
+	 */
+	for (i = 0; i < negop->icframe_vercnt; i++) {
+		if ((negop->icversion_data[i].major == fw_major) &&
+		   (negop->icversion_data[i].minor == fw_minor)) {
+			icframe_major = negop->icversion_data[i].major;
+			icframe_minor = negop->icversion_data[i].minor;
+			found = true;
+		}
+	}
+
+	if (!found)
+		goto handle_error;
+	found = false;
+
+	for (i = negop->icframe_vercnt;
+	    i < negop->icframe_vercnt + negop->icmsg_vercnt; i++) {
+		if ((negop->icversion_data[i].major == srv_major) &&
+		   (negop->icversion_data[i].minor == srv_minor)) {
+			icmsg_major = negop->icversion_data[i].major;
+			icmsg_minor = negop->icversion_data[i].minor;
+			found = true;
+		}
+	}
+
+handle_error:
+	if (!found) {
+		negop->icframe_vercnt = 0;
+		negop->icmsg_vercnt = 0;
+	} else {
+		negop->icframe_vercnt = 1;
+		negop->icmsg_vercnt = 1;
+	}
+
+	negop->icversion_data[0].major = icframe_major;
+	negop->icversion_data[0].minor = icframe_minor;
+	negop->icversion_data[1].major = icmsg_major;
+	negop->icversion_data[1].minor = icmsg_minor;
+	return found;
 }

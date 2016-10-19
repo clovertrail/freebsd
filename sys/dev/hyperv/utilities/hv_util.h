@@ -54,6 +54,11 @@ struct vmbus_ic_desc {
 int		hv_util_attach(device_t dev, vmbus_chan_callback_t cb);
 int		hv_util_detach(device_t dev);
 int		vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[]);
-int		vmbus_ic_negomsg(struct hv_util_sc *, void *data, int *dlen);
+boolean_t	hv_util_negotiate_version(uint8_t*, int, int);
 
+extern int util_fw_ver;
+extern int sd_srv_ver;
+extern int ts_srv_ver;
+extern int hb_srv_ver;
+extern int kvp_srv_ver;
 #endif

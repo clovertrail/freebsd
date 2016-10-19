@@ -39,10 +39,6 @@
 #define VMBUS_ICMSG_STATUS_OK		0x00000000
 #define VMBUS_ICMSG_STATUS_FAIL		0x80004005
 
-#define VMBUS_IC_VERSION(major, minor)	((major) | (((uint32_t)(minor)) << 16))
-#define VMBUS_ICVER_MAJOR(ver)		((ver) & 0xffff)
-#define VMBUS_ICVER_MINOR(ver)		(((ver) & 0xffff0000) >> 16)
-
 struct vmbus_pipe_hdr {
 	uint32_t		ph_flags;
 	uint32_t		ph_msgsz;

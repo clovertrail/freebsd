@@ -62,6 +62,7 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/hyperv/include/hyperv.h>
 #include <dev/hyperv/utilities/hv_utilreg.h>
+#include <dev/hyperv/utilities/hv_common.h>
 
 #include "hv_util.h"
 #include "unicode.h"
@@ -211,48 +212,6 @@ hv_kvp_transaction_init(hv_kvp_sc *sc, uint32_t rcv_len,
 		sizeof(struct hv_vmbus_pipe_hdr) +
 		sizeof(struct hv_vmbus_icmsg_hdr)];
 }
-
-
-/*
- * hv_kvp - version neogtiation function
- */
-static void
-hv_kvp_negotiate_version(struct hv_vmbus_icmsg_hdr *icmsghdrp, uint8_t *buf)
-{
-	struct hv_vmbus_icmsg_negotiate *negop;
-	int icframe_vercnt;
-	int icmsg_vercnt;
-
-	icmsghdrp->icmsgsize = 0x10;
-
-	negop = (struct hv_vmbus_icmsg_negotiate *)&buf[
-		sizeof(struct hv_vmbus_pipe_hdr) +
-		sizeof(struct hv_vmbus_icmsg_hdr)];
-	icframe_vercnt = negop->icframe_vercnt;
-	icmsg_vercnt = negop->icmsg_vercnt;
-
-	/*
-	 * Select the framework version number we will support
-	 */
-	if ((icframe_vercnt >= 2) && (negop->icversion_data[1].major == 3)) {
-		icframe_vercnt = 3;
-		if (icmsg_vercnt > 2)
-			icmsg_vercnt = 4;
-		else
-			icmsg_vercnt = 3;
-	} else {
-		icframe_vercnt = 1;
-		icmsg_vercnt = 1;
-	}
-
-	negop->icframe_vercnt = 1;
-	negop->icmsg_vercnt = 1;
-	negop->icversion_data[0].major = icframe_vercnt;
-	negop->icversion_data[0].minor = 0;
-	negop->icversion_data[1].major = icmsg_vercnt;
-	negop->icversion_data[1].minor = 0;
-}
-
 
 /*
  * Convert ip related info in umsg from utf8 to utf16 and store in hmsg
@@ -535,7 +494,7 @@ hv_kvp_convert_usermsg_to_hostmsg(struct hv_kvp_msg *umsg, struct hv_kvp_msg *hm
 		host_exchg_data->value_type = HV_REG_SZ;
 
 		if ((hkey_len < 0) || (hvalue_len < 0))
-			return (HV_KVP_E_FAIL);
+			return (HV_E_FAIL);
 
 		return (KVP_SUCCESS);
 
@@ -553,12 +512,12 @@ hv_kvp_convert_usermsg_to_hostmsg(struct hv_kvp_msg *umsg, struct hv_kvp_msg *hm
 		host_exchg_data->value_type = HV_REG_SZ;
 
 		if ((hkey_len < 0) || (hvalue_len < 0))
-			return (HV_KVP_E_FAIL);
+			return (HV_E_FAIL);
 
 		return (KVP_SUCCESS);
 
 	default:
-		return (HV_KVP_E_FAIL);
+		return (HV_E_FAIL);
 	}
 }
 
@@ -575,7 +534,7 @@ hv_kvp_respond_host(hv_kvp_sc *sc, int error)
 	    &sc->rcv_buf[sizeof(struct hv_vmbus_pipe_hdr)];
 
 	if (error)
-		error = HV_KVP_E_FAIL;
+		error = HV_E_FAIL;
 
 	hv_icmsg_hdrp->status = error;
 	hv_icmsg_hdrp->icflags = HV_ICMSGHDRFLAG_TRANSACTION | HV_ICMSGHDRFLAG_RESPONSE;
@@ -623,7 +582,7 @@ hv_kvp_process_request(void *context, int pending)
 	uint64_t requestid;
 	struct hv_vmbus_icmsg_hdr *icmsghdrp;
 	int ret = 0;
-	hv_kvp_sc		*sc;
+	hv_kvp_sc *sc;
 
 	hv_kvp_log_info("%s: entering hv_kvp_process_request\n", __func__);
 
@@ -643,7 +602,7 @@ hv_kvp_process_request(void *context, int pending)
 
 		hv_kvp_transaction_init(sc, recvlen, requestid, kvp_buf);
 		if (icmsghdrp->icmsgtype == HV_ICMSGTYPE_NEGOTIATE) {
-			hv_kvp_negotiate_version(icmsghdrp, kvp_buf);
+			hv_util_negotiate_version(kvp_buf, util_fw_ver, kvp_srv_ver);
 			hv_kvp_respond_host(sc, ret);
 
 			/*
@@ -689,7 +648,7 @@ hv_kvp_process_request(void *context, int pending)
 		 */
 		if (hv_kvp_req_in_progress(sc)) {
 			hv_kvp_log_info("%s: request was still active after wait so failing\n", __func__);
-			hv_kvp_respond_host(sc, HV_KVP_E_FAIL);
+			hv_kvp_respond_host(sc, HV_E_FAIL);
 			sc->req_in_progress = false;
 		}
 

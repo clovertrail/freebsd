@@ -29,11 +29,6 @@
 #ifndef _HV_UTILREG_H_
 #define _HV_UTILREG_H_
 
-#define HV_S_OK			0x00000000
-#define HV_E_FAIL		0x80004005
-#define HV_ERROR_NOT_SUPPORTED	0x80070032
-#define HV_ERROR_MACHINE_LOCKED	0x800704F7
-
 /*
  * Common defines for Hyper-V ICs
  */
