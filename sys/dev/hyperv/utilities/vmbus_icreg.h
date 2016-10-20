@@ -39,6 +39,11 @@
 #define VMBUS_ICMSG_STATUS_OK		0x00000000
 #define VMBUS_ICMSG_STATUS_FAIL		0x80004005
 
+/*
+ * Version for both framework and message is
+ * 32 bits long with major on higher 16 bits
+ * and minor on lower 16 bits.
+ */
 #define VMBUS_IC_VERSION(major, minor)	((major) | (((uint32_t)(minor)) << 16))
 #define VMBUS_ICVER_MAJOR(ver)		((ver) & 0xffff)
 #define VMBUS_ICVER_MINOR(ver)		(((ver) & 0xffff0000) >> 16)

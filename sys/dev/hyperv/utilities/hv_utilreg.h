@@ -49,43 +49,31 @@
 #define HV_ICMSGHDRFLAG_RESPONSE	4
 
 typedef struct hv_vmbus_pipe_hdr {
-	uint32_t flags;
-	uint32_t msgsize;
+        uint32_t flags;
+        uint32_t msgsize;
 } __packed hv_vmbus_pipe_hdr;
 
 typedef struct hv_vmbus_ic_version {
-	uint16_t major;
-	uint16_t minor;
+        uint16_t major;
+        uint16_t minor;
 } __packed hv_vmbus_ic_version;
 
 typedef struct hv_vmbus_icmsg_hdr {
-	hv_vmbus_ic_version	icverframe;
-	uint16_t		icmsgtype;
-	hv_vmbus_ic_version	icvermsg;
-	uint16_t		icmsgsize;
-	uint32_t		status;
-	uint8_t			ictransaction_id;
-	uint8_t			icflags;
-	uint8_t			reserved[2];
+        hv_vmbus_ic_version     icverframe;
+        uint16_t                icmsgtype;
+        hv_vmbus_ic_version     icvermsg;
+        uint16_t                icmsgsize;
+        uint32_t                status;
+        uint8_t                 ictransaction_id;
+        uint8_t                 icflags;
+        uint8_t                 reserved[2];
 } __packed hv_vmbus_icmsg_hdr;
 
 typedef struct hv_vmbus_icmsg_negotiate {
-	uint16_t		icframe_vercnt;
-	uint16_t		icmsg_vercnt;
-	uint32_t		reserved;
-	hv_vmbus_ic_version	icversion_data[1]; /* any size array */
+        uint16_t                icframe_vercnt;
+        uint16_t                icmsg_vercnt;
+        uint32_t                reserved;
+        hv_vmbus_ic_version     icversion_data[1]; /* any size array */
 } __packed hv_vmbus_icmsg_negotiate;
-
-typedef struct hv_vmbus_shutdown_msg_data {
-	uint32_t		reason_code;
-	uint32_t		timeout_seconds;
-	uint32_t 		flags;
-	uint8_t			display_message[2048];
-} __packed hv_vmbus_shutdown_msg_data;
-
-typedef struct hv_vmbus_heartbeat_msg_data {
-	uint64_t 		seq_num;
-	uint32_t 		reserved[8];
-} __packed hv_vmbus_heartbeat_msg_data;
 
 #endif	/* !_HV_UTILREG_H_ */

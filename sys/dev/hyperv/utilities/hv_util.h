@@ -51,9 +51,20 @@ struct vmbus_ic_desc {
 
 #define VMBUS_IC_DESC_END	{ .ic_desc = NULL }
 
-int		hv_util_attach(device_t dev, vmbus_chan_callback_t cb);
-int		hv_util_detach(device_t dev);
-int		vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[]);
-int		vmbus_ic_negomsg(struct hv_util_sc *, void *data, int *dlen);
+int hv_util_attach(device_t dev, vmbus_chan_callback_t cb);
+int hv_util_detach(device_t dev);
+int vmbus_ic_probe(device_t dev, const struct vmbus_ic_desc descs[]);
+int vmbus_ic_negomsg(device_t dev, void *data, int *dlen0,
+    uint32_t fw_ver, uint32_t msg_ver);
+/*
+ * Framework version for util services.
+ */
+#define UTIL_FW_MINOR              0
+
+#define UTIL_WS2008_FW_MAJOR       1
+#define UTIL_WS2008_FW_VERSION     VMBUS_IC_VERSION(UTIL_WS2008_FW_MAJOR, UTIL_FW_MINOR)
+
+#define UTIL_FW_MAJOR              3
+#define UTIL_FW_VERSION            VMBUS_IC_VERSION(UTIL_FW_MAJOR, UTIL_FW_MINOR)
 
 #endif

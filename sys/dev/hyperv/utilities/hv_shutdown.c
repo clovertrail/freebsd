@@ -41,6 +41,13 @@ __FBSDID("$FreeBSD$");
 
 #include "vmbus_if.h"
 
+#define SD_MAJOR            3
+#define SD_MINOR            0
+#define SD_VERSION          VMBUS_IC_VERSION(SD_MAJOR, SD_MINOR)
+
+#define SD_WS2008_MAJOR     1
+#define SD_WS2008_VERSION   VMBUS_IC_VERSION(SD_WS2008_MAJOR, SD_MINOR)
+
 static const struct vmbus_ic_desc vmbus_shutdown_descs[] = {
 	{
 		.ic_guid = { .hv_guid = {
@@ -60,7 +67,9 @@ vmbus_shutdown_cb(struct vmbus_channel *chan, void *xsc)
 	int dlen, error, do_shutdown = 0;
 	uint64_t xactid;
 	void *data;
+	uint32_t vmbus_version, fw_ver, msg_ver;
 
+	vmbus_version = VMBUS_GET_VERSION(device_get_parent(sc->ic_dev), sc->ic_dev);
 	/*
 	 * Receive request.
 	 */
@@ -82,7 +91,16 @@ vmbus_shutdown_cb(struct vmbus_channel *chan, void *xsc)
 	 */
 	switch (hdr->ic_type) {
 	case VMBUS_ICMSG_TYPE_NEGOTIATE:
-		error = vmbus_ic_negomsg(sc, data, &dlen);
+		switch(vmbus_version) {
+		case VMBUS_VERSION_WS2008:
+			fw_ver  = UTIL_WS2008_FW_VERSION;
+			msg_ver = SD_WS2008_VERSION;
+			break;
+		default:
+			fw_ver  = UTIL_FW_VERSION;
+			msg_ver = SD_VERSION;
+		}
+		error = vmbus_ic_negomsg(sc->ic_dev, data, &dlen, fw_ver, msg_ver);
 		if (error)
 			return;
 		break;
