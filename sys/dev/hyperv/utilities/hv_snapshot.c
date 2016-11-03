@@ -827,10 +827,43 @@ hv_vss_init_req(hv_vss_req_internal *reqp,
 	reqp->vss_req.opt_msg.msgid = (vm_ts.tv_sec * NANOSEC) + vm_ts.tv_nsec;
 }
 
+static hv_vss_req_internal*
+hv_vss_fetch_new_req(hv_vss_sc *sc)
+{
+	hv_vss_req_internal *reqp;
+	if (LIST_EMPTY(&sc->req_free_list)) {
+		/* TODO Error: no buffer */
+		hv_vss_log_info("Error: No buffer\n");
+		return (NULL);
+	}
+	reqp = LIST_FIRST(&sc->req_free_list);
+	LIST_REMOVE(reqp, link);
+	return (reqp);
+}
+
+static hv_vss_req_internal*
+hv_vss_get_new_req_locked(hv_vss_sc *sc)
+{
+	if (!STAILQ_EMPTY(&sc->to_daemon_notify_queue) ||
+	    !STAILQ_EMPTY(&sc->to_daemon_ack_queue) ||
+	    !STAILQ_EMPTY(&sc->to_app_notify_queue) ||
+	    !STAILQ_EMPTY(&sc->to_app_ack_queue)) {
+		/*
+		 * There is request coming from host before
+		 * finishing previous requests
+		 */
+		hv_vss_log_info("%s: Warning: there is new request "
+		    "coming before finishing previous requests\n", __func__);
+		return (NULL);
+	}
+	return hv_vss_fetch_new_req(sc);
+}
+
 static void
 hv_vss_notify(hv_vss_req_internal *reqp, uint32_t opt)
 {
 	hv_vss_sc *sc = reqp->sc;
+	hv_vss_req_internal *appreqp;
 	/*
 	 * Freeze notification sequence: kernel -> app -> daemon(fs)
 	 * Thaw notification sequence:   kernel -> daemon(fs) -> app
@@ -852,6 +885,16 @@ hv_vss_notify(hv_vss_req_internal *reqp, uint32_t opt)
 		hv_vss_notify_daemon(sc, reqp, hv_vss_check_timeout);
 		atomic_fetchadd_int(&sc->vss_serv_count, 1);
 		if (sc->app_register_done) {
+			mtx_lock(&sc->pending_mutex);
+			appreqp = hv_vss_fetch_new_req(sc);
+			mtx_unlock(&sc->pending_mutex);
+			if (appreqp == NULL) {
+				/* TODO Error: no buffer */
+				hv_vss_log_info("Error: No buffer\n");
+			}
+			/* copy the request */
+			hv_vss_init_req(appreqp, reqp->host_msg_len,
+			    reqp->host_msg_id, reqp->rcv_buf, sc);
 			hv_vss_notify_app(sc, reqp, hv_appvss_check_timeout);
 			atomic_fetchadd_int(&sc->vss_serv_count, 1);
 		}
@@ -859,31 +902,6 @@ hv_vss_notify(hv_vss_req_internal *reqp, uint32_t opt)
 	}
 }
 
-static hv_vss_req_internal*
-hv_vss_get_new_req_locked(hv_vss_sc *sc)
-{
-	hv_vss_req_internal *reqp;
-	if (!STAILQ_EMPTY(&sc->to_daemon_notify_queue) ||
-	    !STAILQ_EMPTY(&sc->to_daemon_ack_queue) ||
-	    !STAILQ_EMPTY(&sc->to_app_notify_queue) ||
-	    !STAILQ_EMPTY(&sc->to_app_ack_queue)) {
-		/*
-		 * There is request coming from host before
-		 * finishing previous requests
-		 */
-		hv_vss_log_info("%s: Warning: there is new request "
-		    "coming before finishing previous requests\n", __func__);
-		return (NULL);
-	}
-	if (LIST_EMPTY(&sc->req_free_list)) {
-		/* TODO Error: no buffer */
-		hv_vss_log_info("Error: No buffer\n");
-		return (NULL);
-	}
-	reqp = LIST_FIRST(&sc->req_free_list);
-	LIST_REMOVE(reqp, link);
-	return (reqp);
-}
 /*
  * Function to read the vss request buffer from host
  * and interact with daemon
