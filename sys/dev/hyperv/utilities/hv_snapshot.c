@@ -895,7 +895,7 @@ hv_vss_notify(hv_vss_req_internal *reqp, uint32_t opt)
 			/* copy the request */
 			hv_vss_init_req(appreqp, reqp->host_msg_len,
 			    reqp->host_msg_id, reqp->rcv_buf, sc);
-			hv_vss_notify_app(sc, reqp, hv_appvss_check_timeout);
+			hv_vss_notify_app(sc, appreqp, hv_appvss_check_timeout);
 			atomic_fetchadd_int(&sc->vss_serv_count, 1);
 		}
 		break;
