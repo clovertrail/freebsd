@@ -3773,6 +3773,53 @@ zfs_ioc_destroy(zfs_cmd_t *zc)
 	return (err);
 }
 
+static int
+zfs_ioc_suspend(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	int error = 0;
+	zfsvfs_t *zfsvfs;
+	uint8_t sleep = 60; /* sleep 60 seconds defaultly */
+	(void) nvlist_lookup_uint8(innvl, "suspendtime", &sleep);
+	printf("%s: %s\n", __func__, fsname);
+	vfs_t* vfsp = zfs_get_vfs(fsname);
+	if (vfsp != NULL) {
+		zfsvfs = vfsp->vfs_data;
+		if (zfsvfs->z_osname == NULL) {
+			zfsvfs->z_osname = kmem_zalloc(MAXNAMELEN, KM_SLEEP);
+			dmu_objset_name(zfsvfs->z_os, zfsvfs->z_osname);
+			if (zfsvfs->z_osname[0] == '\0') {
+				return EINVAL;
+			}
+		}
+		error = zfs_suspend_fs(zfsvfs);
+		tsleep(zfsvfs->z_osname, 0, "zfsfreeze", sleep * hz);
+		printf("%s: freezing timeout\n", __func__);
+		if (error == 0) {
+			dsl_dataset_t *ds;
+			ds = dmu_objset_ds(zfsvfs->z_os);
+			error = zfs_resume_fs(zfsvfs, ds);
+		}
+	}
+	return (error);
+}
+
+static int
+zfs_ioc_resume(const char *fsname, nvlist_t *args, nvlist_t *outnvl)
+{
+	zfsvfs_t *zfsvfs;
+	printf("%s: %s\n", __func__, fsname);
+	vfs_t* vfsp = zfs_get_vfs(fsname);
+	if (vfsp != NULL) {
+		zfsvfs = vfsp->vfs_data;
+		if (zfsvfs->z_osname) {
+			wakeup(zfsvfs->z_osname);
+			printf("%s: resume the frozen fs '%s'\n",
+			    __func__, fsname);
+		}
+		return (0);
+	}
+	return (1);
+}
 /*
  * fsname is name of dataset to rollback (to most recent snapshot)
  *
@@ -3787,7 +3834,6 @@ zfs_ioc_rollback(const char *fsname, nvlist_t *args, nvlist_t *outnvl)
 {
 	zfsvfs_t *zfsvfs;
 	int error;
-
 	if (getzfsvfs(fsname, &zfsvfs) == 0) {
 		dsl_dataset_t *ds;
 
@@ -5923,6 +5969,14 @@ zfs_ioctl_init(void)
 	zfs_ioctl_register("get_holds", ZFS_IOC_GET_HOLDS,
 	    zfs_ioc_get_holds, zfs_secpolicy_read, DATASET_NAME,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
+
+	zfs_ioctl_register("suspend", ZFS_IOC_SUSPEND,
+	    zfs_ioc_suspend, zfs_secpolicy_none, DATASET_NAME,
+	    POOL_CHECK_SUSPENDED, B_FALSE, B_TRUE);
+
+	zfs_ioctl_register("resume", ZFS_IOC_RESUME,
+	    zfs_ioc_resume, zfs_secpolicy_none, DATASET_NAME,
+	    POOL_CHECK_SUSPENDED, B_FALSE, B_TRUE);
 
 	zfs_ioctl_register("rollback", ZFS_IOC_ROLLBACK,
 	    zfs_ioc_rollback, zfs_secpolicy_rollback, DATASET_NAME,

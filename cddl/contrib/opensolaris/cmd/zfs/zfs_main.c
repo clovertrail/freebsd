@@ -110,6 +110,8 @@ static int zfs_do_diff(int argc, char **argv);
 static int zfs_do_jail(int argc, char **argv);
 static int zfs_do_unjail(int argc, char **argv);
 static int zfs_do_bookmark(int argc, char **argv);
+static int zfs_do_suspend(int argc, char **argv);
+static int zfs_do_resume(int argc, char **argv);
 
 /*
  * Enable a reasonable set of defaults for libumem debugging on DEBUG builds.
@@ -159,6 +161,8 @@ typedef enum {
 	HELP_RELEASE,
 	HELP_DIFF,
 	HELP_BOOKMARK,
+	HELP_SUSPEND,
+	HELP_RESUME,
 } zfs_help_t;
 
 typedef struct zfs_command {
@@ -215,6 +219,9 @@ static zfs_command_t command_table[] = {
 	{ NULL },
 	{ "jail",	zfs_do_jail,		HELP_JAIL		},
 	{ "unjail",	zfs_do_unjail,		HELP_UNJAIL		},
+	{ NULL },
+	{ "suspend",	zfs_do_suspend,		HELP_SUSPEND		},
+	{ "resume",	zfs_do_resume,		HELP_RESUME		},
 };
 
 #define	NCOMMAND	(sizeof (command_table) / sizeof (command_table[0]))
@@ -339,6 +346,13 @@ get_usage(zfs_help_t idx)
 		    "[snapshot|filesystem]\n"));
 	case HELP_BOOKMARK:
 		return (gettext("\tbookmark <snapshot> <bookmark>\n"));
+	case HELP_SUSPEND:
+		return (gettext("\tsuspend [-d duration(sec)] "
+		    "<filesystem|volume> ...\n"
+		    "\t    The default duration is 60 seconds. "
+		    "Max duration is 240 sec\n"));
+	case HELP_RESUME:
+		return (gettext("\tresume <filesystem|volume>\n"));
 	}
 
 	abort();
@@ -3552,6 +3566,65 @@ out:
 		return (1);
 }
 
+static int zfs_do_suspend(int argc, char **argv)
+{
+	zfs_handle_t *zhp;
+	int sleep = 0;
+	int c;
+	while ((c = getopt(argc, argv, ":d:")) != -1) {
+		switch(c) {
+		case 'd':
+			sleep = (int)strtol(optarg, NULL, 10);
+			if (sleep > 240) {
+				(void) fprintf(stderr,
+				    gettext("invalid option '%d'\n"), sleep);
+				usage(B_FALSE);
+			}
+			break;
+		case '?':
+			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	/* check number of arguments */
+	if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing dataset argument\n"));
+		usage(B_FALSE);
+	}
+	if (argc > 1) {
+		(void) fprintf(stderr, gettext("too many arguments\n"));
+		usage(B_FALSE);
+	}
+	zhp = zfs_open(g_zfs, argv[0], ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME);
+	if (zhp == NULL)
+		return (1);
+	lzc_suspend(argv[0], (uint8_t)sleep);
+	zfs_close(zhp);
+	return (0);
+}
+
+static int zfs_do_resume(int argc, char **argv)
+{
+	zfs_handle_t *zhp;
+	argc -= optind;
+	argv += optind;
+
+	/* check number of arguments */
+	if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing dataset argument\n"));
+		usage(B_FALSE);
+	}
+	if (argc > 1) {
+		(void) fprintf(stderr, gettext("too many arguments\n"));
+		usage(B_FALSE);
+	}
+	lzc_resume(argv[0]);
+	return (0);
+}
 /*
  * zfs set property=value ... { fs | snap | vol } ...
  *

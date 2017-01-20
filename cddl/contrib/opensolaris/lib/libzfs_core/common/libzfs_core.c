@@ -366,6 +366,33 @@ lzc_snaprange_space(const char *firstsnap, const char *lastsnap,
 	return (err);
 }
 
+int
+lzc_suspend(const char *name, uint8_t sleep)
+{
+	nvlist_t *args;
+	nvlist_t *result;
+	int err;
+	args = fnvlist_alloc();
+	fnvlist_add_uint8(args, "suspendtime", sleep);
+	err = lzc_ioctl(ZFS_IOC_SUSPEND, name, args, &result);
+	fnvlist_free(args);
+	fnvlist_free(result);
+	return err;
+}
+
+int
+lzc_resume(const char *name)
+{
+	nvlist_t *args;
+	nvlist_t *result;
+	int err;
+	args = fnvlist_alloc();
+	err = lzc_ioctl(ZFS_IOC_RESUME, name, args, &result);
+	fnvlist_free(args);
+	fnvlist_free(result);
+	return err;
+}
+
 boolean_t
 lzc_exists(const char *dataset)
 {

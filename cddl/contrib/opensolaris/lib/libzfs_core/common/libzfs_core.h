@@ -81,7 +81,8 @@ int lzc_receive_with_header(const char *, nvlist_t *, const char *, boolean_t,
 boolean_t lzc_exists(const char *);
 
 int lzc_rollback(const char *, char *, int);
-
+int lzc_suspend(const char *, uint8_t);
+int lzc_resume(const char *);
 #ifdef	__cplusplus
 }
 #endif

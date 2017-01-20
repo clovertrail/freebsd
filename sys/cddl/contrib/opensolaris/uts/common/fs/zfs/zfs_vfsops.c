@@ -1135,6 +1135,7 @@ zfsvfs_free(zfsvfs_t *zfsvfs)
 	rw_destroy(&zfsvfs->z_fuid_lock);
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
 		mutex_destroy(&zfsvfs->z_hold_mtx[i]);
+	kmem_free(zfsvfs->z_osname, MAXNAMELEN);
 	kmem_free(zfsvfs, sizeof (zfsvfs_t));
 }
 
@@ -1833,7 +1834,6 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	znode_t	*zp;
 
 	rrm_enter(&zfsvfs->z_teardown_lock, RW_WRITER, FTAG);
-
 	if (!unmounting) {
 		/*
 		 * We purge the parent filesystem's vfsp as the parent
@@ -1884,7 +1884,6 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 			zfs_znode_dmu_fini(zp);
 		}
 	mutex_exit(&zfsvfs->z_znodes_lock);
-
 	/*
 	 * If we are unmounting, set the unmounted flag and let new vops
 	 * unblock.  zfs_inactive will have the unmounted behavior, and all
@@ -1908,7 +1907,6 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	 * Unregister properties.
 	 */
 	zfs_unregister_callbacks(zfsvfs);
-
 	/*
 	 * Evict cached data
 	 */
