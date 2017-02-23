@@ -95,6 +95,8 @@ static int zpool_do_history(int, char **);
 static int zpool_do_get(int, char **);
 static int zpool_do_set(int, char **);
 
+static int zpool_do_suspend(int, char **);
+static int zpool_do_resume(int, char **);
 /*
  * These libumem hooks provide a reasonable set of defaults for the allocator's
  * debugging facilities.
@@ -138,7 +140,9 @@ typedef enum {
 	HELP_SET,
 	HELP_SPLIT,
 	HELP_REGUID,
-	HELP_REOPEN
+	HELP_REOPEN,
+	HELP_SUSPEND,
+	HELP_RESUME
 } zpool_help_t;
 
 
@@ -190,6 +194,9 @@ static zpool_command_t command_table[] = {
 	{ "history",	zpool_do_history,	HELP_HISTORY		},
 	{ "get",	zpool_do_get,		HELP_GET		},
 	{ "set",	zpool_do_set,		HELP_SET		},
+	{ NULL },
+	{ "suspend",	zpool_do_suspend,	HELP_SUSPEND		},
+	{ "resume",	zpool_do_resume,	HELP_RESUME		}
 };
 
 #define	NCOMMAND	(sizeof (command_table) / sizeof (command_table[0]))
@@ -270,6 +277,10 @@ get_usage(zpool_help_t idx)
 		    "[<device> ...]\n"));
 	case HELP_REGUID:
 		return (gettext("\treguid <pool>\n"));
+	case HELP_SUSPEND:
+		return (gettext("\tsuspend <pool>\n"));
+	case HELP_RESUME:
+		return (gettext("\tresume <pool>\n"));
 	}
 
 	abort();
@@ -5495,6 +5506,22 @@ set_callback(zpool_handle_t *zhp, void *data)
 		cb->cb_any_successful = B_TRUE;
 
 	return (error);
+}
+
+int
+zpool_do_suspend(int argc, char **argv)
+{
+	zfs_cmd_t zc = { 0 };
+	(void) strlcpy(zc.zc_name, argv[1], sizeof (zc.zc_name));
+	return (zfs_ioctl(g_zfs, ZFS_IOC_POOL_SUSPEND, &zc));
+}
+
+int
+zpool_do_resume(int argc, char **argv)
+{
+	zfs_cmd_t zc = { 0 };
+	(void) strlcpy(zc.zc_name, argv[1], sizeof (zc.zc_name));
+	return (zfs_ioctl(g_zfs, ZFS_IOC_POOL_RESUME, &zc));
 }
 
 int

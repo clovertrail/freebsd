@@ -3701,6 +3701,49 @@ zfs_ioc_get_bookmarks(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	return (dsl_get_bookmarks(fsname, innvl, outnvl));
 }
 
+static int
+zfs_ioc_pool_suspend(const char *poolname, nvlist_t *innvl,
+    nvlist_t *outnvl)
+{
+	spa_t *spa;
+	printf("%s: enter\n", __func__);
+	mutex_enter(&spa_namespace_lock);
+	spa = spa_lookup(poolname);
+	if (spa == NULL) {
+		mutex_exit(&spa_namespace_lock);
+		return (SET_ERROR(EIO));
+	}
+	mutex_exit(&spa_namespace_lock);
+	/* flush the dirty pages */
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	spa->spa_is_frozen = B_TRUE;
+	printf("%s: exit\n", __func__);
+	return (0);
+}
+
+static int
+zfs_ioc_pool_resume(const char *poolname, nvlist_t *innvl,
+    nvlist_t *outnvl)
+{
+	spa_t *spa;
+	mutex_enter(&spa_namespace_lock);
+	spa = spa_lookup(poolname);
+	printf("%s: enter: %s\n", __func__, poolname);
+	if (spa == NULL) {
+		mutex_exit(&spa_namespace_lock);
+		return (SET_ERROR(EIO));
+	}
+	mutex_exit(&spa_namespace_lock);
+	mutex_enter(&spa->spa_freeze_lock);
+	if (spa->spa_is_frozen) {
+		spa->spa_is_frozen = B_FALSE;
+		cv_signal(&spa->spa_freeze_cv);
+	}
+	mutex_exit(&spa->spa_freeze_lock);
+	printf("%s: exit: %s\n", __func__, poolname);
+	return (0);
+}
+
 /*
  * innvl: {
  *     bookmark name 1, bookmark name 2
@@ -5941,6 +5984,12 @@ zfs_ioctl_init(void)
 	    POOL_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 
+	zfs_ioctl_register("suspend", ZFS_IOC_POOL_SUSPEND,
+	    zfs_ioc_pool_suspend, zfs_secpolicy_none, POOL_NAME,
+	    POOL_CHECK_SUSPENDED, B_FALSE, B_TRUE);
+	zfs_ioctl_register("resume", ZFS_IOC_POOL_RESUME,
+	    zfs_ioc_pool_resume, zfs_secpolicy_none, POOL_NAME,
+	    POOL_CHECK_SUSPENDED, B_FALSE, B_TRUE);
 	/* IOCTLS that use the legacy function signature */
 
 	zfs_ioctl_register_legacy(ZFS_IOC_POOL_FREEZE, zfs_ioc_pool_freeze,

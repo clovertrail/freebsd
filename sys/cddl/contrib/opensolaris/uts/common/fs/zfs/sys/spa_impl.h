@@ -230,6 +230,9 @@ struct spa {
 	zio_t		*spa_suspend_zio_root;	/* root of all suspended I/O */
 	kmutex_t	spa_suspend_lock;	/* protects suspend_zio_root */
 	kcondvar_t	spa_suspend_cv;		/* notification of resume */
+	kmutex_t	spa_freeze_lock;	/* protects freeze the pool */
+	kcondvar_t	spa_freeze_cv;		/* notification of resume */
+	boolean_t	spa_is_frozen;		/* pool is frozen */
 	uint8_t		spa_suspended;		/* pool is suspended */
 	uint8_t		spa_claiming;		/* pool is doing zil_claim() */
 	boolean_t	spa_debug;		/* debug enabled? */

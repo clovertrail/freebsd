@@ -7014,6 +7014,14 @@ spa_sync(spa_t *spa, uint64_t txg)
 		    all_vdev_zap_entry_count);
 	}
 
+	/* freeze the pool until thaw it by invoking zfs_ioc_pool_resume */
+	mutex_enter(&spa->spa_freeze_lock);
+	while (spa->spa_is_frozen) {
+		printf("%s: before cv_wait\n", __func__);
+		cv_wait(&spa->spa_freeze_cv, &spa->spa_freeze_lock);
+		printf("%s: after cv_wait\n", __func__);
+	}
+	mutex_exit(&spa->spa_freeze_lock);
 	/*
 	 * Rewrite the vdev configuration (which includes the uberblock)
 	 * to commit the transaction group.
