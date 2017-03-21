@@ -52,6 +52,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/callout.h>
 
+#include <sys/kbio.h>
+#include <dev/kbd/kbdreg.h>
+#include <dev/kbd/kbdtables.h>
+
 #include <dev/hyperv/include/hyperv.h>
 #include <dev/hyperv/utilities/hv_utilreg.h>
 #include <dev/hyperv/utilities/vmbus_icreg.h>
@@ -85,7 +89,7 @@ enum hv_kbd_msg_type_t {
 };
 
 typedef struct hv_kbd_msg_hdr_t {
-	enum hv_kbd_msg_type_t type;
+	uint32_t type;
 } hv_kbd_msg_hdr;
 
 typedef struct hv_kbd_msg_t {
@@ -127,7 +131,7 @@ typedef struct hv_kbd_keystroke_t {
 typedef struct hv_kbd_sc {
 	struct vmbus_channel	*hs_chan;
 	device_t		dev;
-	struct vmbus_xact_ctx	*hs_xact;
+	struct vmbus_xact_ctx	*hs_xact_ctx;
 	hv_kbd_proto_resp	resp;
 	int32_t			buflen;
 	uint8_t			*buf;
@@ -146,10 +150,159 @@ static const struct vmbus_ic_desc vmbus_kbd_descs[] = {
 static int hv_kbd_attach(device_t dev);
 static int hv_kbd_detach(device_t dev);
 
+#define HVKBD_MTX_LOCK(_m) do {		\
+	mtx_lock(_m);			\
+} while (0)
+
+#define HVKBD_MTX_UNLOCK(_m) do {	\
+	mtx_unlock(_m);			\
+} while (0)
+
+#define HVKBD_MTX_ASSERT(_m, _t) do {	\
+	mtx_assert(_m, _t);		\
+} while (0)
+
+#define	HVKBD_LOCK()	HVKBD_MTX_LOCK(&Giant)
+#define	HVKBD_UNLOCK()	HVKBD_MTX_UNLOCK(&Giant)
+#define	HVKBD_LOCK_ASSERT()	HVKBD_MTX_ASSERT(&Giant, MA_OWNED)
+
+/* early keyboard probe, not supported */
+static int
+hvkbd_configure(int flags)
+{
+	return (0);
+}
+
+/* detect a keyboard, not used */
+static int
+hvkbd_probe(int unit, void *arg, int flags)
+{
+	return (ENXIO);
+}
+
+/* reset and initialize the device, not used */
+static int
+hvkbd_init(int unit, keyboard_t **kbdp, void *arg, int flags)
+{
+	return (ENXIO);
+}
+
+/* test the interface to the device, not used */
+static int
+hvkbd_test_if(keyboard_t *kbd)
+{
+	return (0);
+}
+
+/* finish using this keyboard, not used */
+static int
+hvkbd_term(keyboard_t *kbd)
+{
+	return (ENXIO);
+}
+
+/* keyboard interrupt routine, not used */
+static int
+hvkbd_intr(keyboard_t *kbd, void *arg)
+{
+	return (0);
+}
+
+/* lock the access to the keyboard, not used */
+static int
+hvkbd_lock(keyboard_t *kbd, int lock)
+{
+	return (1);
+}
+
+/* save the internal state, not used */
+static int
+hvkbd_get_state(keyboard_t *kbd, void *buf, size_t len)
+{
+	return (len == 0) ? 1 : -1;
+}
+
+/* set the internal state, not used */
+static int
+hvkbd_set_state(keyboard_t *kbd, void *buf, size_t len)
+{
+	return (EINVAL);
+}
+
+static int
+hvkbd_poll(keyboard_t *kbd, int on)
+{
+	return (0);
+}
+
+/*
+ * Enable the access to the device; until this function is called,
+ * the client cannot read from the keyboard.
+ */
+static int
+hvkbd_enable(keyboard_t *kbd)
+{
+	return (0);
+}
+
+/* disallow the access to the device */
+static int
+hvkbd_disable(keyboard_t *kbd)
+{
+	return (0);
+}
+/* Currently wait is always false. */
+static uint32_t
+hvkbd_read_char(keyboard_t *kbd, int wait)
+{
+	uint32_t keycode;
+
+	HVKBD_LOCK();
+	keycode = ukbd_read_char_locked(kbd, wait);
+	HVKBD_UNLOCK();
+
+	return (keycode);
+}
+
+static keyboard_switch_t hvkbdsw = {
+	hvkbd_probe,		/* not used */
+	hvkbd_init,
+	hvkbd_term,		/* not used */
+	hvkbd_intr,		/* not used */
+	hvkbd_test_if,		/* not used */
+	hvkbd_enable,
+	hvkbd_disable,
+	hvkbd_read,
+	hvkbd_check,
+	hvkbd_read_char,
+	hvkbd_check_char,
+	hvkbd_ioctl,
+	hvkbd_lock,		/* not used */
+	hvkbd_clear_state,
+	hvkbd_get_state,	/* not used */
+	hvkbd_set_state,	/* not used */
+	genkbd_get_fkeystr,
+	hvkbd_poll,
+	genkbd_diag,
+};
+
+KEYBOARD_DRIVER(hvkbd, hvkbdsw, hvkbd_configure);
+
 static int
 hv_kbd_probe(device_t dev)
 {
 	return (vmbus_ic_probe(dev, vmbus_kbd_descs));
+}
+
+static void
+hv_kbd_on_response(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
+{
+	struct vmbus_xact_ctx *xact = sc->hs_xact_ctx;
+	if (xact != NULL) {
+		printf("kbd complete!\n");
+		vmbus_xact_ctx_wakeup(xact, VMBUS_CHANPKT_CONST_DATA(pkt),
+		    VMBUS_CHANPKT_DATALEN(pkt));
+	}
 }
 
 static void
@@ -173,6 +326,7 @@ hv_kbd_on_received(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 	msg_type = msg->hdr.type;
 	switch (msg_type) {
 		case HV_KBD_PROTO_RESPONSE:
+			hv_kbd_on_response(sc, pkt);
 			device_printf(sc->dev, "==resp: 0x%x\n",
 			    resp->status);
 			break;
@@ -185,6 +339,7 @@ hv_kbd_on_received(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 			break;
 	}
 }
+
 static void 
 hv_kbd_on_channel_callback(struct vmbus_channel *channel, void *xsc)
 {
@@ -200,7 +355,7 @@ hv_kbd_on_channel_callback(struct vmbus_channel *channel, void *xsc)
 		uint32_t rxed = buflen;
 
 		ret = vmbus_chan_recv_pkt(channel, pkt, &rxed);
-		if (ret == ENOBUFS) {
+		if (__predict_false(ret == ENOBUFS)) {
 			buflen = sc->buflen * 2;
 			while (buflen < rxed)
 				buflen *= 2;
@@ -211,19 +366,27 @@ hv_kbd_on_channel_callback(struct vmbus_channel *channel, void *xsc)
 			sc->buf = buf;
 			sc->buflen = buflen;
 			continue;
+		} else if (__predict_false(ret == EAGAIN)) {
+			/* No more channel packets; done! */
+			break;
 		}
+		KASSERT(!ret, ("vmbus_chan_recv_pkt failed: %d", ret));
+
+		device_printf(sc->dev, "event: 0x%x\n", pkt->cph_type);
 		switch (pkt->cph_type) {
 			case VMBUS_CHANPKT_TYPE_COMP:
 			case VMBUS_CHANPKT_TYPE_RXBUF:
+				device_printf(sc->dev, "unhandled event: %d\n",
+				    pkt->cph_type);
 				break;
 			case VMBUS_CHANPKT_TYPE_INBAND:
 				hv_kbd_on_received(sc, pkt);
 				break;
 			default:
+				device_printf(sc->dev, "unknown event: %d\n",
+				    pkt->cph_type);
 				break;
 		}
-		vmbus_xact_ctx_wakeup(sc->hs_xact, VMBUS_CHANPKT_CONST_DATA(pkt),
-		    VMBUS_CHANPKT_DATALEN(pkt));
 	}
 }
 
@@ -235,9 +398,8 @@ hv_kbd_connect_vsp(hv_kbd_sc *sc)
 	struct vmbus_xact *xact;
 	hv_kbd_proto_req *req;
 	const hv_kbd_proto_resp *resp;
-	//bzero(req, sizeof(hv_kbd_proto_req));
 
-	xact = vmbus_xact_get(sc->hs_xact, sizeof(*req));
+	xact = vmbus_xact_get(sc->hs_xact_ctx, sizeof(*req));
 	if (xact == NULL) {
 		device_printf(sc->dev, "no xact for kbd init");
 		return (ENODEV);
@@ -251,22 +413,27 @@ hv_kbd_connect_vsp(hv_kbd_sc *sc)
 		VMBUS_CHANPKT_TYPE_INBAND,
 		VMBUS_CHANPKT_FLAG_RC,
 		req, sizeof(hv_kbd_proto_req),
-		(uint64_t)(uintptr_t)req);
+		(uint64_t)(uintptr_t)xact);
 	if (ret) {
+		device_printf(sc->dev, "fail to send\n");
 		vmbus_xact_deactivate(xact);
 		return (ret);
 	}
 	resp = vmbus_chan_xact_wait(sc->hs_chan, xact, &resplen, true);
 	if (resplen < HV_KBD_PROTO_RESP_SZ) {
 		device_printf(sc->dev, "hv_kbd init communicate failed\n");
-		return (ENODEV);
+		ret = ENODEV;
+		goto clean;
 	}
 
 	if (!(resp->status & HV_KBD_PROTO_ACCEPTED)) {
 		device_printf(sc->dev, "hv_kbd protocol request failed\n");
-		return (ENODEV);
+		ret = ENODEV;
 	}
-	return (0);
+clean:
+	vmbus_xact_put(xact);
+	device_printf(sc->dev, "finish connect_vsp\n");
+	return (ret);
 }
 
 static int
@@ -310,17 +477,20 @@ hv_kbd_attach(device_t dev)
 	sc = device_get_softc(dev);
 	sc->hs_chan = vmbus_get_channel(dev);
 	sc->dev = dev;
-	sc->hs_xact = vmbus_xact_ctx_create(bus_get_dma_tag(dev),
+	sc->hs_xact_ctx = vmbus_xact_ctx_create(bus_get_dma_tag(dev),
 	    HV_KBD_PROTO_REQ_SZ, HV_KBD_PROTO_RESP_SZ, 0);
-	if (sc->hs_xact == NULL) {
+	if (sc->hs_xact_ctx == NULL) {
 		error = ENOMEM;
 		goto failed;
 	}
 
-	hv_kbd_attach1(dev, hv_kbd_on_channel_callback);
+	error = hv_kbd_attach1(dev, hv_kbd_on_channel_callback);
+	if (error)
+		goto failed;
 	error = hv_kbd_connect_vsp(sc);
 	if (error)
 		goto failed;
+	return (0);
 failed:
 	hv_kbd_detach(dev);
 	return (error);
@@ -330,10 +500,11 @@ static int
 hv_kbd_detach(device_t dev)
 {
 	hv_kbd_sc *sc = device_get_softc(dev);
-	if (sc->hs_xact != NULL)
-		vmbus_xact_ctx_destroy(sc->hs_xact);
+	if (sc->hs_xact_ctx != NULL)
+		vmbus_xact_ctx_destroy(sc->hs_xact_ctx);
 	return (hv_kbd_detach1(dev));
 }
+
 
 static device_method_t kbd_methods[] = {
 	/* Device interface */
