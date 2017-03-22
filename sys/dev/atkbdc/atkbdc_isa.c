@@ -39,6 +39,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/rman.h>
 #include <machine/bus.h>
 
+#include <sys/sysctl.h>
 #include <dev/atkbdc/atkbdc_subr.h>
 #include <dev/atkbdc/atkbdcreg.h>
 
@@ -183,7 +184,19 @@ atkbdc_isa_probe(device_t dev)
 
 	return error;
 }
-
+#if 0
+static void
+atksysctl(device_t dev)
+{
+	struct sysctl_oid_list *child;
+	struct sysctl_ctx_list *ctx;
+	atkbdc_softc_t *sc = device_get_softc(dev);
+	ctx = device_get_sysctl_ctx(dev);
+	child = SYSCTL_CHILDREN(device_get_sysctl_tree(dev));
+	SYSCTL_ADD_INT(ctx, child, OID_AUTO, "debug", CTLFLAG_RW,
+	    &sc->debug, 0, "dump scancode & keycode");
+}
+#endif
 static int
 atkbdc_isa_attach(device_t dev)
 {
@@ -239,6 +252,9 @@ atkbdc_isa_attach(device_t dev)
 	}
 	*(atkbdc_softc_t **)device_get_softc(dev) = sc;
 
+	sc->debug = 0;
+	sc->dev = dev;
+	//atksysctl(dev);
 	bus_generic_probe(dev);
 	bus_generic_attach(dev);
 

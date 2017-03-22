@@ -196,6 +196,7 @@ atkbdc_ebus_attach(device_t dev)
 		device_set_softc(dev, sc);
 	}
 
+	sc->dev = dev;
 	rid = 0;
 	if (bus_get_resource(dev, SYS_RES_MEMORY, rid, &start, &count) != 0) {
 		device_printf(dev,

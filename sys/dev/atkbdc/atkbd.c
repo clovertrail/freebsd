@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/limits.h>
 #include <sys/malloc.h>
+#include <sys/sysctl.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -75,6 +76,18 @@ typedef struct atkbd_state {
 static void		atkbd_timeout(void *arg);
 static void		atkbd_shutdown_final(void *v);
 static int		atkbd_reset(KBDC kbdc, int flags, int c);
+
+#define kbdcp(p)	((atkbdc_softc_t *)(p))
+#define DB_PRINT(p, ...)					\
+	do {							\
+		atkbdc_softc_t *sc = (atkbdc_softc_t *)p;	\
+		if (sc->debug > 1) {				\
+			device_printf(sc->dev, __VA_ARGS__);	\
+		} else {					\
+			device_printf(sc->dev, "nodebug %d\n",	\
+			    sc->debug);				\
+		}						\
+	} while (0)
 
 #define HAS_QUIRK(p, q)		(((atkbdc_softc_t *)(p))->quirks & q)
 #define ALLOW_DISABLE_KBD(kbdc)	!HAS_QUIRK(kbdc, KBDC_QUIRK_KEEP_ACTIVATED)
@@ -364,6 +377,7 @@ atkbd_probe(int unit, void *arg, int flags)
 static int
 atkbd_init(int unit, keyboard_t **kbdp, void *arg, int flags)
 {
+	//DB_PRINT(kbdcp(state->kbdc), "%s\n", __func__);
 	keyboard_t *kbd;
 	atkbd_state_t *state;
 	keymap_t *keymap;
@@ -617,6 +631,7 @@ atkbd_disable(keyboard_t *kbd)
 static int
 atkbd_read(keyboard_t *kbd, int wait)
 {
+	DB_PRINT(kbdcp(((atkbd_state_t *)kbd->kb_data)->kbdc), "%s\n", __func__);
 	int c;
 
 	if (wait)
@@ -632,6 +647,7 @@ atkbd_read(keyboard_t *kbd, int wait)
 static int
 atkbd_check(keyboard_t *kbd)
 {
+	DB_PRINT(kbdcp(((atkbd_state_t *)kbd->kb_data)->kbdc), "%s\n", __func__);
 	if (!KBD_IS_ACTIVE(kbd))
 		return FALSE;
 	return kbdc_data_ready(((atkbd_state_t *)kbd->kb_data)->kbdc);
@@ -641,6 +657,7 @@ atkbd_check(keyboard_t *kbd)
 static u_int
 atkbd_read_char(keyboard_t *kbd, int wait)
 {
+	DB_PRINT(kbdcp(((atkbd_state_t *)kbd->kb_data)->kbdc), "%s\n", __func__);
 	atkbd_state_t *state;
 	u_int action;
 	int scancode;
@@ -669,6 +686,9 @@ next_code:
 	}
 	++kbd->kb_count;
 
+	DB_PRINT(kbdcp(state->kbdc),
+	    "ksmode: %d, ks_prefix: %x, ks_flags: 0x%x, SCANCODE: 0x%x\n",
+	    state->ks_mode, state->ks_prefix, state->ks_flags, scancode);
 #if KBDIO_DEBUG >= 10
 	printf("atkbd_read_char(): scancode:0x%x\n", scancode);
 #endif
@@ -889,6 +909,7 @@ next_code:
 		}
 	}
 
+	DB_PRINT(kbdcp(state->kbdc), "keycode: 0x%x\n", keycode);
 	/* keycode to key action */
 	action = genkbd_keyaction(kbd, keycode, scancode & 0x80,
 				  &state->ks_state, &state->ks_accents);
@@ -1331,6 +1352,19 @@ probe_keyboard(KBDC kbdc, int flags)
 	return (HAS_QUIRK(kbdc, KBDC_QUIRK_IGNORE_PROBE_RESULT) ? 0 : err);
 }
 
+static void
+atksysctl(KBDC kbdc)
+{
+	device_t dev = kbdcp(kbdc)->dev;
+	struct sysctl_oid_list *child;
+	struct sysctl_ctx_list *ctx;
+	atkbdc_softc_t *sc = kbdcp(kbdc);
+	ctx = device_get_sysctl_ctx(dev);
+	child = SYSCTL_CHILDREN(device_get_sysctl_tree(dev));
+	SYSCTL_ADD_INT(ctx, child, OID_AUTO, "debug", CTLFLAG_RW,
+	    &sc->debug, 0, "dump scancode & keycode");
+}
+
 static int
 init_keyboard(KBDC kbdc, int *type, int flags)
 {
@@ -1342,7 +1376,7 @@ init_keyboard(KBDC kbdc, int *type, int flags)
 		/* driver error? */
 		return EIO;
 	}
-
+	atksysctl(kbdc);
 	/* temporarily block data transmission from the keyboard */
 	write_controller_command(kbdc, KBDC_DISABLE_KBD_PORT);
 

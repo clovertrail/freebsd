@@ -207,6 +207,8 @@ typedef struct atkbdc_softc {
 #define KBDC_QUIRK_IGNORE_PROBE_RESULT	(1 << 1)
 #define KBDC_QUIRK_RESET_AFTER_PROBE	(1 << 2)
 #define KBDC_QUIRK_SETLEDS_ON_INIT	(1 << 3)
+    int debug;
+    device_t dev;
 } atkbdc_softc_t; 
 
 enum kbdc_device_ivar {
