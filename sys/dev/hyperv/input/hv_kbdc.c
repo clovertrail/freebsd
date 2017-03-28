@@ -226,14 +226,14 @@ hv_kbd_on_received(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 	switch (msg_type) {
 		case HV_KBD_PROTO_RESPONSE:
 			hv_kbd_on_response(sc, pkt);
-			device_printf(sc->dev, "==resp: 0x%x\n",
+			DEBUG_HVSC(sc, "keyboard resp: 0x%x\n",
 			    resp->status);
 			break;
 		case HV_KBD_PROTO_EVENT:
 			info = keystroke->ks.info;
 			scan_code = keystroke->ks.makecode;
-			device_printf(sc->dev, "--key info: 0x%x, scan: 0x%x\n",
-			    info, scan_code);
+			//device_printf(sc->dev, "--key info: 0x%x, scan: 0x%x\n",
+			//    info, scan_code);
 			hv_kbd_produce_ks(sc, &keystroke->ks);
 			hv_kbd_intr(sc);
 		default:
@@ -241,14 +241,15 @@ hv_kbd_on_received(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 	}
 }
 
-static void 
-hv_kbd_on_channel_callback(struct vmbus_channel *channel, void *xsc)
+void 
+hv_kbd_read_channel(struct vmbus_channel *channel, void *context)
 {
 	uint8_t *buf;
 	uint32_t buflen = 0;
 	int ret = 0;
 
-	hv_kbd_sc *sc = (hv_kbd_sc*)xsc;
+	hv_kbd_sc *sc = (hv_kbd_sc*)context;
+	channel = vmbus_get_channel(sc->dev);
 	buf = sc->buf;
 	buflen = sc->buflen;
 	while (1) {
@@ -403,6 +404,20 @@ hv_kbd_fini(hv_kbd_sc *sc)
 	mtx_destroy(&sc->ks_mtx);
 }
 
+static void
+hv_kbd_sysctl(device_t dev)
+{
+	struct sysctl_oid_list *child;
+	struct sysctl_ctx_list *ctx;
+	hv_kbd_sc *sc;
+
+	sc = device_get_softc(dev);
+	ctx = device_get_sysctl_ctx(dev);
+	child = SYSCTL_CHILDREN(device_get_sysctl_tree(dev));
+	SYSCTL_ADD_INT(ctx, child, OID_AUTO, "debug", CTLFLAG_RW,
+	    &sc->debug, 0, "debug hyperv keyboard");
+}
+
 static int
 hv_kbd_attach(device_t dev)
 {
@@ -420,14 +435,17 @@ hv_kbd_attach(device_t dev)
 		goto failed;
 	}
 
-	error = hv_kbd_attach1(dev, hv_kbd_on_channel_callback);
+	error = hv_kbd_attach1(dev, hv_kbd_read_channel);
 	if (error)
 		goto failed;
 	error = hv_kbd_connect_vsp(sc);
 	if (error)
 		goto failed;
 
-	hv_kbd_drv_attach(dev);
+	error = hv_kbd_drv_attach(dev);
+	if (error)
+		goto failed;
+	hv_kbd_sysctl(dev);
 	return (0);
 failed:
 	hv_kbd_detach(dev);

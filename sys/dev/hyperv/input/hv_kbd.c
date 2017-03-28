@@ -76,11 +76,6 @@ __FBSDID("$FreeBSD$");
 
 #define HVKBD_FLAG_POLLING	0x00000002
 
-#define DEBUG_HVKBD(kbd, ...) do {		\
-	hv_kbd_sc *sc = (kbd)->kb_data;		\
-	device_printf(sc->dev, __VA_ARGS__);	\
-} while (0)
-
 /* early keyboard probe, not supported */
 static int
 hvkbd_configure(int flags)
@@ -154,7 +149,6 @@ hvkbd_set_state(keyboard_t *kbd, void *buf, size_t len)
 static int
 hvkbd_poll(keyboard_t *kbd, int on)
 {
-	DEBUG_HVKBD(kbd, "%s\n", __func__);
 	hv_kbd_sc *sc = kbd->kb_data;
 
 	HVKBD_LOCK();
@@ -169,10 +163,8 @@ hvkbd_poll(keyboard_t *kbd, int on)
 
 	if (sc->sc_polling != 0) {
 		sc->sc_flags |= HVKBD_FLAG_POLLING;
-		//sc->sc_poll_thread = curthread;
 	} else {
 		sc->sc_flags &= ~HVKBD_FLAG_POLLING;
-		//sc->sc_delay = 0;
 	}
 	HVKBD_UNLOCK();
 	return (0);
@@ -202,6 +194,25 @@ hvkbd_disable(keyboard_t *kbd)
 	return (0);
 }
 
+static void
+hvkbd_do_poll(hv_kbd_sc *sc, uint8_t wait)
+{
+	while (!hv_kbd_prod_is_ready(sc)) {
+		hv_kbd_read_channel(NULL, sc);
+		if (!wait)
+			break;
+	}
+}
+
+/* check if data is waiting */
+/* Currently unused. */
+static int
+hvkbd_check(keyboard_t *kbd)
+{
+	DEBUG_HVKBD(kbd, "%s\n", __func__);
+	return (0);
+}
+
 /* check if char is waiting */
 static int
 hvkbd_check_char_locked(keyboard_t *kbd)
@@ -211,15 +222,17 @@ hvkbd_check_char_locked(keyboard_t *kbd)
 		return (FALSE);
 
 	hv_kbd_sc *sc = kbd->kb_data;
-	int is_ready = hv_kbd_prod_is_ready(sc);
-	DEBUG_HVKBD(kbd, "%s is_ready: %d\n", __func__, is_ready);
-	return (is_ready);
+	if (sc->sc_flags & HVKBD_FLAG_POLLING)
+		hvkbd_do_poll(sc, 0);
+	if (hv_kbd_prod_is_ready(sc)) {
+		return (TRUE);
+	}
+	return (FALSE);
 }
 
 static int
 hvkbd_check_char(keyboard_t *kbd)
 {
-	DEBUG_HVKBD(kbd, "%s\n", __func__);
 	int result;
 
 	HVKBD_LOCK();
@@ -228,7 +241,6 @@ hvkbd_check_char(keyboard_t *kbd)
 
 	return (result);
 }
-
 
 /* read char from the keyboard */
 static uint32_t
@@ -263,7 +275,6 @@ hvkbd_read_char_locked(keyboard_t *kbd, int wait)
 static uint32_t
 hvkbd_read_char(keyboard_t *kbd, int wait)
 {
-	DEBUG_HVKBD(kbd, "%s\n", __func__);
 	uint32_t keycode;
 
 	HVKBD_LOCK();
@@ -277,7 +288,6 @@ hvkbd_read_char(keyboard_t *kbd, int wait)
 static void
 hvkbd_clear_state(keyboard_t *kbd)
 {
-	DEBUG_HVKBD(kbd, "%s\n", __func__);
 	hv_kbd_sc *sc = kbd->kb_data;
 	sc->sc_state &= LOCK_MASK;	/* preserve locking key state */
 	sc->sc_flags &= ~HVKBD_FLAG_POLLING;
@@ -316,7 +326,9 @@ hvkbd_ioctl_locked(keyboard_t *kbd, u_long cmd, caddr_t arg)
 		case K_RAW:
 		case K_CODE:
 			if (sc->sc_mode != *(int *)arg) {
-				hvkbd_clear_state(kbd);
+				DEBUG_HVKBD(kbd, "mod changed to %x\n", *(int *)arg);
+				if ((sc->sc_flags & HVKBD_FLAG_POLLING) == 0)
+					hvkbd_clear_state(kbd);
 				sc->sc_mode = *(int *)arg;
 			}
 			break;
@@ -390,33 +402,6 @@ hvkbd_ioctl(keyboard_t *kbd, u_long cmd, caddr_t arg)
 	return (ret);
 }
 
-static void
-hvkbd_do_poll(hv_kbd_sc *sc, uint8_t wait)
-{
-	while (!hv_kbd_prod_is_ready(sc)) {
-		DELAY(1000);
-		kern_yield(PRI_UNCHANGED);
-	}
-}
-
-/* check if data is waiting */
-/* Currently unused. */
-static int
-hvkbd_check(keyboard_t *kbd)
-{
-	DEBUG_HVKBD(kbd, "%s\n", __func__);
-	hv_kbd_sc *sc = kbd->kb_data;
-	HVKBD_LOCK_ASSERT();
-	if (!KBD_IS_ACTIVE(kbd))
-		return (0);
-	if (sc->sc_flags & HVKBD_FLAG_POLLING)
-		hvkbd_do_poll(sc, 0);
-	if (hv_kbd_prod_is_ready(sc)) {
-		return (1);
-	}
-	return (0);
-}
-
 /* read one byte from the keyboard if it's allowed */
 /* Currently unused. */
 static int
@@ -457,6 +442,9 @@ void
 hv_kbd_intr(hv_kbd_sc *sc)
 {
 	uint32_t c;
+	if ((sc->sc_flags & HVKBD_FLAG_POLLING) != 0)
+		return;
+
 	if (KBD_IS_ACTIVE(&sc->sc_kbd) &&
 	    KBD_IS_BUSY(&sc->sc_kbd)) {
 		/* let the callback function process the input */
@@ -482,40 +470,6 @@ hvkbd_driver_load(module_t mod, int what, void *arg)
 		break;
 	}
 	return (0);
-}
-
-#define P(kbd, X)	DEBUG_HVKBD(kbd, "%s: %lx\n", #X, X)
-
-static void
-hv_kbd_print_ioctl_cmd(keyboard_t *kbd)
-{
-	P(kbd, KDGKBMODE);
-	P(kbd, KDSKBMODE);
-	P(kbd, KDGETLED);
-	P(kbd, KDSETLED);
-	P(kbd, KDGKBSTATE);
-	P(kbd, KDSKBSTATE);
-	P(kbd, KDSETREPEAT);
-	P(kbd, KDSETRAD);
-	P(kbd, PIO_KEYMAP);
-	P(kbd, OPIO_KEYMAP);
-	P(kbd, PIO_KEYMAPENT);
-	P(kbd, PIO_DEADKEYMAP);
-	P(kbd, KDGKBINFO);
-	P(kbd, KDGKBTYPE);
-	P(kbd, KDGETREPEAT);
-	P(kbd, GIO_KEYMAP);
-	P(kbd, OGIO_KEYMAP);
-	P(kbd, PIO_KEYMAP);
-	P(kbd, OPIO_KEYMAP);
-	P(kbd, GIO_KEYMAPENT);
-	P(kbd, PIO_KEYMAPENT);
-	P(kbd, GIO_DEADKEYMAP);
-	P(kbd, PIO_DEADKEYMAP);
-	P(kbd, GETFKEY);
-	P(kbd, SETFKEY);
-	P(kbd, KBADDKBD);
-	P(kbd, KBRELKBD);
 }
 
 int
@@ -551,7 +505,6 @@ hv_kbd_drv_attach(device_t dev)
 #endif
 	if (bootverbose) {
 		genkbd_diag(kbd, bootverbose);
-		hv_kbd_print_ioctl_cmd(kbd);
 	}
 	return (0);
 detach:
