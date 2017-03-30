@@ -153,7 +153,7 @@ hv_kbd_produce_ks(hv_kbd_sc *sc, const keystroke *ks)
 	keystroke_info *ksi;
 	mtx_lock(&sc->ks_mtx);
 	if (LIST_EMPTY(&sc->ks_free_list)) {
-		device_printf(sc->dev, "NO buffer!\n");
+		DEBUG_HVSC(sc, "NO buffer!\n");
 		ret = 1;
 	} else {
 		ksi = LIST_FIRST(&sc->ks_free_list);
@@ -166,22 +166,61 @@ hv_kbd_produce_ks(hv_kbd_sc *sc, const keystroke *ks)
 }
 
 /**
- * return 0 if successfully consuming keystroke
+ * return 0 if successfully get the 1st item of queue without removing it
  */
 int
-hv_kbd_consume_ks(hv_kbd_sc *sc, keystroke *result)
+hv_kbd_fetch_top(hv_kbd_sc *sc, keystroke *result)
 {
 	int ret = 0;
 	keystroke_info *ksi = NULL;
 	mtx_lock(&sc->ks_mtx);
 	if (STAILQ_EMPTY(&sc->ks_queue)) {
-		device_printf(sc->dev, "Empty queue!\n");
+		DEBUG_HVSC(sc, "Empty queue!\n");
 		ret = 1;
 	} else {
 		ksi = STAILQ_FIRST(&sc->ks_queue);
 		*result = ksi->ks;
+	}
+	mtx_unlock(&sc->ks_mtx);
+	return (ret);
+}
+
+/**
+ * return 0 if successfully removing the top item
+ */
+int
+hv_kbd_remove_top(hv_kbd_sc *sc)
+{
+	int ret = 0;
+	keystroke_info *ksi = NULL;
+	mtx_lock(&sc->ks_mtx);
+	if (STAILQ_EMPTY(&sc->ks_queue)) {
+		DEBUG_HVSC(sc, "Empty queue!\n");
+		ret = 1;
+	} else {
+		ksi = STAILQ_FIRST(&sc->ks_queue);
 		STAILQ_REMOVE_HEAD(&sc->ks_queue, slink);
 		LIST_INSERT_HEAD(&sc->ks_free_list, ksi, link);
+	}
+	mtx_unlock(&sc->ks_mtx);
+	return (ret);
+}
+
+/**
+ * return 0 if successfully modify the 1st item of queue
+ */
+int
+hv_kbd_modify_top(hv_kbd_sc *sc, keystroke *top)
+{
+	int ret = 0;
+	keystroke_info *ksi = NULL;
+	mtx_lock(&sc->ks_mtx);
+	if (STAILQ_EMPTY(&sc->ks_queue)) {
+		DEBUG_HVSC(sc, "Empty queue!\n");
+		ret = 1;
+	} else {
+		ksi = STAILQ_FIRST(&sc->ks_queue);
+		ksi->ks = *top;
 	}
 	mtx_unlock(&sc->ks_mtx);
 	return (ret);
@@ -198,7 +237,7 @@ hv_kbd_on_response(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 {
 	struct vmbus_xact_ctx *xact = sc->hs_xact_ctx;
 	if (xact != NULL) {
-		device_printf(sc->dev, "kbd complete!\n");
+		DEBUG_HVSC(sc, "hvkbd is ready\n");
 		vmbus_xact_ctx_wakeup(xact, VMBUS_CHANPKT_CONST_DATA(pkt),
 		    VMBUS_CHANPKT_DATALEN(pkt));
 	}
@@ -232,8 +271,8 @@ hv_kbd_on_received(hv_kbd_sc *sc, struct vmbus_chanpkt_hdr *pkt)
 		case HV_KBD_PROTO_EVENT:
 			info = keystroke->ks.info;
 			scan_code = keystroke->ks.makecode;
-			//device_printf(sc->dev, "--key info: 0x%x, scan: 0x%x\n",
-			//    info, scan_code);
+			DEBUG_HVSC(sc, "keystroke info: 0x%x, scan: 0x%x\n",
+			    info, scan_code);
 			hv_kbd_produce_ks(sc, &keystroke->ks);
 			hv_kbd_intr(sc);
 		default:
@@ -274,7 +313,7 @@ hv_kbd_read_channel(struct vmbus_channel *channel, void *context)
 		}
 		KASSERT(!ret, ("vmbus_chan_recv_pkt failed: %d", ret));
 
-		device_printf(sc->dev, "event: 0x%x\n", pkt->cph_type);
+		DEBUG_HVSC(sc, "event: 0x%x\n", pkt->cph_type);
 		switch (pkt->cph_type) {
 			case VMBUS_CHANPKT_TYPE_COMP:
 			case VMBUS_CHANPKT_TYPE_RXBUF:
@@ -334,7 +373,7 @@ hv_kbd_connect_vsp(hv_kbd_sc *sc)
 	}
 clean:
 	vmbus_xact_put(xact);
-	device_printf(sc->dev, "finish connect_vsp\n");
+	DEBUG_HVSC(sc, "finish connect vsp\n");
 	return (ret);
 }
 

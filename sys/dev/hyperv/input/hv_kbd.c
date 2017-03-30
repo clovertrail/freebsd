@@ -254,20 +254,38 @@ hvkbd_read_char_locked(keyboard_t *kbd, int wait)
 	if (!KBD_IS_ACTIVE(kbd) || !hv_kbd_prod_is_ready(sc))
 		return (NOKEY);
 	if (sc->sc_mode == K_RAW) {
-		if (hv_kbd_consume_ks(sc, &ks)) {
+		if (hv_kbd_fetch_top(sc, &ks)) {
 			return (NOKEY);
 		}
-		scancode = ks.makecode;
-		if (ks.info & IS_BREAK) {
-			scancode |= XTKBD_RELEASE;
-		} else if (ks.info & IS_E0) {
-			device_printf(sc->dev, "Not handled 0x%x\n", IS_E0);
-		} else if (ks.info & IS_E1) {
-			device_printf(sc->dev, "Not handled 0x%x\n", IS_E1);
+		if ((ks.info & IS_E0) || (ks.info & IS_E1)) {
+			/**
+			 * Emulate the generation of E0 or E1 scancode,
+			 * the real scancode will be consumed next time.
+			 */
+			if (ks.info & IS_E0) {
+				scancode = XTKBD_EMUL0;
+				ks.info &= ~IS_E0;
+			} else if (ks.info & IS_E1) {
+				scancode = XTKBD_EMUL1;
+				ks.info &= ~IS_E1;
+			}
+			/**
+			 * Change the top item to avoid encountering
+			 * E0 or E1 twice.
+			 */
+			hv_kbd_modify_top(sc, &ks);
+		} else {
+			scancode = ks.makecode;
+			if (ks.info & IS_BREAK) {
+				scancode |= XTKBD_RELEASE;
+			}
+			hv_kbd_remove_top(sc);
 		}
 	} else {
 		device_printf(sc->dev, "Unsupported mode: %d\n", sc->sc_mode);
 	}
+	++kbd->kb_count;
+	DEBUG_HVKBD(kbd, "read scan: 0x%x\n", scancode);
 	return scancode;
 }
 
@@ -352,7 +370,7 @@ hvkbd_ioctl_locked(keyboard_t *kbd, u_long cmd, caddr_t arg)
 		}
 		sc->sc_state &= ~LOCK_MASK;
 		sc->sc_state |= *(int *)arg;
-		return (0);
+		return hvkbd_ioctl_locked(kbd, KDSETLED, arg);
 	case KDGETLED:			/* get keyboard LED */
 		*(int *)arg = KBD_LED_VAL(kbd);
 		break;
@@ -379,7 +397,7 @@ hvkbd_ioctl_locked(keyboard_t *kbd, u_long cmd, caddr_t arg)
 				i &= ~CLKED;
 		}
 		if (KBD_HAS_DEVICE(kbd)) {
-			device_printf(sc->dev, "unsupported: set led \n");
+			DEBUG_HVSC(sc, "setled 0x%x\n", *(int *)arg);
 		}
 
 		KBD_LED_VAL(kbd) = *(int *)arg;
