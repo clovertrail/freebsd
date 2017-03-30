@@ -274,6 +274,18 @@ hvkbd_read_char_locked(keyboard_t *kbd, int wait)
 			 * E0 or E1 twice.
 			 */
 			hv_kbd_modify_top(sc, &ks);
+		} else if (ks.info & IS_UNICODE) {
+			/**
+			 * XXX: Hyperv host send unicode to VM through
+			 * 'Type clipboard text', the mapping from
+			 * unicode to scancode depends on the keymap.
+			 * It is so complicated that we do not plan to
+			 * support it yet.
+			 */
+			if (bootverbose)
+				device_printf(sc->dev, "Unsupported unicode\n");
+			hv_kbd_remove_top(sc);
+			return (NOKEY);
 		} else {
 			scancode = ks.makecode;
 			if (ks.info & IS_BREAK) {
@@ -282,7 +294,8 @@ hvkbd_read_char_locked(keyboard_t *kbd, int wait)
 			hv_kbd_remove_top(sc);
 		}
 	} else {
-		device_printf(sc->dev, "Unsupported mode: %d\n", sc->sc_mode);
+		if (bootverbose)
+			device_printf(sc->dev, "Unsupported mode: %d\n", sc->sc_mode);
 	}
 	++kbd->kb_count;
 	DEBUG_HVKBD(kbd, "read scan: 0x%x\n", scancode);
