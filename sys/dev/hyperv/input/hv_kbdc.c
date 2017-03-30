@@ -58,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/hyperv/include/vmbus_xact.h>
 
 #include "dev/hyperv/input/hv_kbdc.h"
+#include "vmbus_if.h"
 
 #define HV_KBD_VER_MAJOR	(1)
 #define HV_KBD_VER_MINOR	(0)
@@ -229,7 +230,19 @@ hv_kbd_modify_top(hv_kbd_sc *sc, keystroke *top)
 static int
 hv_kbd_probe(device_t dev)
 {
-	return (vmbus_ic_probe(dev, vmbus_kbd_descs));
+	device_t bus = device_get_parent(dev);
+	const struct vmbus_ic_desc *d;
+
+	if (resource_disabled(device_get_name(dev), 0))
+		return (ENXIO);
+
+	for (d = vmbus_kbd_descs; d->ic_desc != NULL; ++d) {
+		if (VMBUS_PROBE_GUID(bus, dev, &d->ic_guid) == 0) {
+			device_set_desc(dev, d->ic_desc);
+			return (BUS_PROBE_DEFAULT);
+		}
+	}
+	return (ENXIO);
 }
 
 static void
