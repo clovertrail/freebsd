@@ -65,10 +65,6 @@ __FBSDID("$FreeBSD$");
 
 #define HV_KBD_VER		(HV_KBD_VER_MINOR | (HV_KBD_VER_MAJOR) << 16)
 
-//#define IS_TERMSRV_SET_LED	(8)
-//#define IS_TERMSRV_SHADOW	(0x10)
-//#define IS_TERMSRV_VKPACKET	(0x20)
-
 #define HV_KBD_PROTO_ACCEPTED	(1)
 
 #define HV_BUFF_SIZE		(4*PAGE_SIZE)
@@ -104,7 +100,8 @@ typedef struct hv_kbd_proto_resp_t {
 #define HV_KBD_PROTO_REQ_SZ	(sizeof(hv_kbd_proto_req))
 #define HV_KBD_PROTO_RESP_SZ	(sizeof(hv_kbd_proto_resp))
 
-/* the struct in win host:
+/**
+ * the struct in win host:
  * typedef struct _HK_MESSAGE_KEYSTROKE
  * {
  *     HK_MESSAGE_HEADER Header;
@@ -115,7 +112,7 @@ typedef struct hv_kbd_proto_resp_t {
  *     UINT32 IsE1:1;
  *     UINT32 Reserved:28;
  * } HK_MESSAGE_KEYSTROKE
- **/
+ */
 typedef struct hv_kbd_keystroke_t {
 	hv_kbd_msg_hdr  hdr;
 	keystroke	ks;
@@ -304,7 +301,7 @@ hv_kbd_read_channel(struct vmbus_channel *channel, void *context)
 	channel = vmbus_get_channel(sc->dev);
 	buf = sc->buf;
 	buflen = sc->buflen;
-	while (1) {
+	for (;;) {
 		struct vmbus_chanpkt_hdr *pkt = (struct vmbus_chanpkt_hdr *)buf;
 		uint32_t rxed = buflen;
 
@@ -328,18 +325,18 @@ hv_kbd_read_channel(struct vmbus_channel *channel, void *context)
 
 		DEBUG_HVSC(sc, "event: 0x%x\n", pkt->cph_type);
 		switch (pkt->cph_type) {
-			case VMBUS_CHANPKT_TYPE_COMP:
-			case VMBUS_CHANPKT_TYPE_RXBUF:
-				device_printf(sc->dev, "unhandled event: %d\n",
-				    pkt->cph_type);
-				break;
-			case VMBUS_CHANPKT_TYPE_INBAND:
-				hv_kbd_on_received(sc, pkt);
-				break;
-			default:
-				device_printf(sc->dev, "unknown event: %d\n",
-				    pkt->cph_type);
-				break;
+		case VMBUS_CHANPKT_TYPE_COMP:
+		case VMBUS_CHANPKT_TYPE_RXBUF:
+			device_printf(sc->dev, "unhandled event: %d\n",
+			    pkt->cph_type);
+			break;
+		case VMBUS_CHANPKT_TYPE_INBAND:
+			hv_kbd_on_received(sc, pkt);
+			break;
+		default:
+			device_printf(sc->dev, "unknown event: %d\n",
+			    pkt->cph_type);
+			break;
 		}
 	}
 }
