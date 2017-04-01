@@ -251,7 +251,7 @@ struct vstor_packet {
 #define SRB_STATUS_AUTOSENSE_VALID      0x80
 
 #define SRB_STATUS(status)	\
-	(status & ~(SRB_STATUS_AUTOSENSE_VALID | SRB_STATUS_QUEUE_FROZEN))
+	((status) & ~(SRB_STATUS_AUTOSENSE_VALID | SRB_STATUS_QUEUE_FROZEN))
 /*
  * SRB Flag Bits
  */
