@@ -709,7 +709,7 @@ parse_mount(char **conf)
 	char *errmsg;
 	struct mntarg *ma;
 	char *dev, *fs, *opts, *tok;
-	int error;
+	int delay, error, timeout, err_stride;
 
 	error = parse_token(conf, &tok);
 	if (error)
@@ -750,15 +750,38 @@ parse_mount(char **conf)
 	if (error != 0)
 		goto out;
 
-	ma = NULL;
-	ma = mount_arg(ma, "fstype", fs, -1);
-	ma = mount_arg(ma, "fspath", "/", -1);
-	ma = mount_arg(ma, "from", dev, -1);
-	ma = mount_arg(ma, "errmsg", errmsg, ERRMSGL);
-	ma = mount_arg(ma, "ro", NULL, 0);
-	ma = parse_mountroot_options(ma, opts);
-	error = kernel_mount(ma, MNT_ROOTFS);
+	/**
+	 * For ZFS we can't simply wait for a specific device
+	 * as we only know the pool name. To work around this,
+	 * parse_mount() will retry the mount later on.
+	 */
+	delay = hz / 10;
+	timeout = root_mount_timeout * hz;
+	err_stride = 0;
+	do {
+		ma = NULL;
+		ma = mount_arg(ma, "fstype", fs, -1);
+		ma = mount_arg(ma, "fspath", "/", -1);
+		ma = mount_arg(ma, "from", dev, -1);
+		ma = mount_arg(ma, "errmsg", errmsg, ERRMSGL);
+		ma = mount_arg(ma, "ro", NULL, 0);
+		ma = parse_mountroot_options(ma, opts);
 
+		error = kernel_mount(ma, MNT_ROOTFS);
+		if (strcmp(fs, "zfs") != 0)
+			break;
+		timeout -= delay;
+		if (timeout > 0 && error) {
+			if (err_stride == 0) {
+				printf("Mounting from %s:%s failed with error %d"
+				    "%d seconds left. Retrying.\n", fs, dev,
+				    error, timeout / hz);
+			}
+			err_stride += 1;
+			err_stride %= 50;
+			pause("rmzfs", delay);
+		}
+	} while (timeout > 0 && error);
  out:
 	if (error) {
 		printf("Mounting from %s:%s failed with error %d",
