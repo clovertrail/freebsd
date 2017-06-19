@@ -2252,11 +2252,13 @@ storvsc_io_done(struct hv_storvsc_request *reqp)
 			}
 		}
 	} else {
-		mtx_lock(&sc->hs_lock);
-		xpt_print(ccb->ccb_h.path,
-			"storvsc scsi_status = %d\n",
-			vm_srb->scsi_status);
-		mtx_unlock(&sc->hs_lock);
+		if (bootverbose) {
+			mtx_lock(&sc->hs_lock);
+			xpt_print(ccb->ccb_h.path,
+				"storvsc scsi_status = %d, srb_status = %d\n",
+				vm_srb->scsi_status, srb_status);
+			mtx_unlock(&sc->hs_lock);
+		}
 		ccb->ccb_h.status |= CAM_SCSI_STATUS_ERROR;
 	}
 
